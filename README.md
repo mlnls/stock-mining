@@ -96,6 +96,17 @@ systemctl list-timers 'stockmining*'
 ```
 
 
+## Lightsail(이미 쓰는 서버)에 배포
+
+S3·IAM 없이 SSH로 올립니다. 토큰은 이 Mac에서 SSM으로 읽어 SSH로만 서버에 전달합니다(`/etc/stockmining/env`).
+다른 서비스(docker)와 같이 쓰는 서버라 작업은 메모리 최대 1.3GB·CPU 1코어로 제한하고, 백업은 서버 안
+`/var/lib/stockmining/backups/`에 최근 14일치를 남깁니다.
+
+```bash
+HOST=54.116.117.190 KEY=~/Downloads/LightsailDefaultKey-ap-northeast-2.pem ./deploy/lightsail.sh
+ssh -i $KEY ubuntu@$HOST 'journalctl -u stockmining@init -f'      # 첫 배포 시 백필 진행 상황
+```
+
 ## 로컬 실행
 
 ```bash
