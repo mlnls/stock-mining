@@ -1,0 +1,20 @@
+name: earnings_gap_drift
+description: >
+  실적 서프라이즈 후 표류(PEAD)·실적 모멘텀의 일봉 근사. 거래량이 50일 평균의 2배 이상 터지며
+  4% 이상 갭상승하고 양봉으로 마감(대개 실적 발표일)한 50일선 위 종목을 사서 최대 60거래일 보유.
+  학술적으로 거래비용 후에도 살아남은 몇 안 되는 효과(Novy-Marx & Velikov).
+source_note: "Bernard & Thomas (1989) PEAD; Novy-Marx & Velikov (2016) A Taxonomy of Anomalies and Their Trading Costs"
+regimes: [bull, neutral]
+params: {gap_min: 4, vol_mult: 2}
+param_grid: {gap_min: [3, 4, 6], vol_mult: [2, 3]}
+entry:
+  type: next_open
+  all:
+    - "gap >= {gap_min}"
+    - "vol_ratio_50 >= {vol_mult}"
+    - "close > open"
+    - "close > sma_50"
+rank: "vol_ratio_50"
+exit:
+  stop_atr: 2.5
+  max_hold: 60

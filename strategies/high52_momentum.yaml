@@ -1,0 +1,20 @@
+name: high52_momentum
+description: >
+  52주 신고가 효과(George & Hwang 2004 등 학술적으로 가장 근거가 많은 모멘텀 변형).
+  거래량을 동반해 52주 신고가로 마감하고 고가 부근에서 끝난 종목을 다음 날 시가 매수.
+source_note: "George & Hwang (2004) The 52-Week High and Momentum Investing"
+regimes: [bull, neutral]
+params: {vol_mult: 2.0}
+param_grid: {vol_mult: [1.5, 2.0, 3.0]}
+entry:
+  type: next_open
+  all:
+    - "close > hh_250"
+    - "vol_ratio_20 >= {vol_mult}"
+    - "close >= high - 0.25 * range"
+    - "close > sma_50"
+rank: "ret_60"
+exit:
+  stop_atr: 2
+  trail_atr: 3
+  max_hold: 30

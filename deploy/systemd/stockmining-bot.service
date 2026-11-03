@@ -1,0 +1,17 @@
+[Unit]
+Description=stockmining Telegram bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=stockmining
+Group=stockmining
+EnvironmentFile=/etc/stockmining/env
+Environment=PATH=/var/lib/stockmining/.local/bin:/usr/local/bin:/usr/bin:/bin:/snap/bin
+WorkingDirectory=/var/lib/stockmining
+ExecStart=/opt/stockmining/.venv/bin/stockmining bot
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

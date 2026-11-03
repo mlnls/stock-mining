@@ -1,0 +1,19 @@
+name: bb_trend_pullback
+description: >
+  상승 추세(200일선 위) 종목이 볼린저 밴드 하단(20일, 2σ) 아래로 마감하면 다음 날 시가 매수,
+  단기 이평 회복 시 청산. 미국 데이터에서 주변 파라미터(손절 2~4ATR, 청산 10/20일선) 대부분이
+  표본 내·외 모두 PF > 1 이었던 견고한 평균회귀 규칙.
+source_note: "John Bollinger 밴드 + Connors식 추세 내 눌림목. 2026-11 이 시스템의 미국 데이터 민감도 분석"
+regimes: [bull, neutral, bear]
+params: {exit_ma: 10, stop_k: 3}
+param_grid: {exit_ma: [10, 20], stop_k: [2.5, 3, 3.5]}
+entry:
+  type: next_open
+  all:
+    - "close > sma_200"
+    - "close < bbl_20"
+rank: "-ret_5"
+exit:
+  stop_atr: "{stop_k}"
+  max_hold: 10
+  exit_when: ["close > sma_{exit_ma}"]

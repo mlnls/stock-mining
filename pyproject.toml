@@ -1,0 +1,31 @@
+[project]
+name = "stockmining"
+version = "0.1.0"
+description = "KRX swing-trading research loop: data -> strategies -> backtest -> Claude review -> Telegram"
+requires-python = ">=3.11"
+dependencies = [
+  "finance-datareader>=0.9.90",
+  "pandas>=2.1",
+  "numpy>=1.26",
+  "anthropic>=2.0",
+  "requests>=2.31",
+  "pyyaml>=6.0",
+  "exchange_calendars>=4.5",
+  "yfinance>=0.2.50",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+stockmining = "stockmining.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]

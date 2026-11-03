@@ -1,0 +1,10 @@
+[Unit]
+Description=stockmining morning (미국 개장 전 브리핑, 한국시간 22:30/21:30)
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 08:30:00 America/New_York
+Persistent=true
+Unit=stockmining@morning.service
+
+[Install]
+WantedBy=timers.target
