@@ -107,6 +107,10 @@ HOST=54.116.117.190 KEY=~/Downloads/LightsailDefaultKey-ap-northeast-2.pem ./dep
 ssh -i $KEY ubuntu@$HOST 'journalctl -u stockmining@init -f'      # 첫 배포 시 백필 진행 상황
 ```
 
+**웹 대시보드(보기 전용)**: `WEB_DOMAIN=stock.54-116-117-190.sslip.io`를 붙여 배포하면 서버의 기존 Caddy(docker)에
+블록을 추가해 HTTPS로 띄웁니다. sslip.io는 IP를 주소로 바꿔 주는 무료 DNS라 도메인 없이 됩니다. 아이디 `me`,
+비밀번호는 서버 `/etc/stockmining/web.env`의 WEB_PASSWORD(처음 배포 때 자동 생성). DB는 읽기 전용으로 엽니다.
+
 ## 로컬 실행
 
 ```bash
