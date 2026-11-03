@@ -34,6 +34,8 @@ def main(argv: list[str] | None = None) -> None:
     s = sub.add_parser("simulate", help="워크포워드 모의투자: 전략 선택 방식·분산 비교 + 1년 성과 확률(몬테카를로)")
     s.add_argument("--profiles", action="store_true", help="안정형/기본형/공격형 비교 + 원금 기준 예상 금액")
     s.add_argument("--start-amount", type=float, default=1_000_000, help="예상 금액 계산 원금 (기본 100만)")
+    s = sub.add_parser("notify", help="메신저로 메시지 보내기 (배치 실패 알림 등)")
+    s.add_argument("text")
     s = sub.add_parser("cmd", help="텔레그램 명령을 로컬에서 실행 (예: cmd '/pos')")
     s.add_argument("text")
 
@@ -92,6 +94,8 @@ def main(argv: list[str] | None = None) -> None:
                   f"월승률 {o.get('pos_month_pct')}%")
         for mp in (5, 10):
             print(f"무작위 선택 기준선(동시 {mp}종목):", SIM.luck_check(app, max_positions=mp))
+    elif a.cmd == "notify":
+        app.tg.send(a.text)
     elif a.cmd == "cmd":
         from . import bot
         print(bot.handle(app, a.text))

@@ -1,11 +1,11 @@
 # Stock-Mining
 
 **미국 주식(NYSE·NASDAQ)** 스윙 트레이딩 연구 루프 (`market: us`, 기본값. `market: kr`로 한국장도 가능). 매일 데이터를 모으고, 여러 트레이더의 규칙을 백테스트와
-페이퍼 트레이딩으로 검증하며, Claude가 리포트와 원칙 수정안을 냅니다. **주문은 사람이 직접** 하고, 텔레그램으로
+페이퍼 트레이딩으로 검증하며, Claude가 리포트와 원칙 수정안을 냅니다. **주문은 사람이 직접** 하고, Slack으로
 매매일지를 남기면 다음 분석에 반영됩니다.
 
 ```
-데이터 수집 ──▶ 저장소(SQLite) ──▶ 전략 엔진 ──▶ Claude 분석 ──▶ 텔레그램 ──▶ 나(판단·주문)
+데이터 수집 ──▶ 저장소(SQLite) ──▶ 전략 엔진 ──▶ Claude 분석 ──▶ Slack ──▶ 나(판단·주문)
 FinanceDataReader   시세·일지·원칙     신호·백테스트·      리포트·원칙 제안     알림·명령     │
                          ▲            페이퍼 트레이딩                                        │
                          └──────────────────── /buy /sell 매매일지 ◀─────────────────────────┘
@@ -32,39 +32,53 @@ Claude가 만든 규칙은 [features.py](src/stockmining/features.py)의 화이�
 | 월~금 17:30 | 화~토 06:30 / 07:30 | `evening` — 시세 갱신(약 1,600종목, 10~15분) → 페이퍼 갱신 → 신호 → 학습 → 추천 → Claude 리포트 |
 | 월~금 08:30 | 월~금 21:30 / 22:30 | `morning` — 개장 전 브리핑(웹 검색): 선물·금리·뉴스·**실적 발표일** 확인, 보류 종목 표시 |
 | — | 토 12:00 | `weekly` — 파라미터 튜닝, 백테스트 갱신, Claude 리서치 → 새 규칙 후보 |
-| 상시 | 상시 | `bot` — 텔레그램 명령 처리 |
+| 상시 | 상시 | `bot` — Slack 명령 처리 |
 
 아침에 일어나면 저녁 리포트(그날 밤 매수 후보)가 와 있고, 개장 1시간 전에 브리핑이 한 번 더 옵니다.
-휴장일은 `exchange_calendars`(XNYS)로 건너뜁니다. 실패하면 텔레그램으로 알림이 갑니다.
+휴장일은 `exchange_calendars`(XNYS)로 건너뜁니다. 실패하면 Slack으로 알림이 갑니다.
 
-## 텔레그램 명령
+## Slack 명령
+
+봇에게 DM으로 보내거나(앞의 `/` 없이), 아무 채널에서 `/sm` 뒤에 붙여 씁니다. 응답은 본인(SLACK_USER_ID)에게만 합니다.
 
 ```
-/buy NVDA 180.5 5 눌림목 매수       매수 기록 (최근 추천 종목이면 손절·목표가 자동 연결)
-/sell NVDA 195 5 목표가 도달        매도 기록
-/stop NVDA 168                      손절가 수정
-/pos  /recs  /strats  /report       포지션·추천·전략 현황·최근 리포트
-/proposals  /approve 3  /reject 3   제안 확인·승인·거절
-/ask 반도체 업황 어때?               Claude에게 질문(웹 검색 포함)
+buy NVDA 180.5 0.5 눌림목 매수      매수 기록 (소수점 수량 가능, 최근 추천 종목이면 손절·목표가 자동 연결)
+sell NVDA 195 0.5 목표가 도달       매도 기록
+stop NVDA 168                       손절가 수정
+pos  recs  strats  report           포지션·추천·전략 현황·최근 리포트
+insights  edge                      학습 일지·엣지 맵
+proposals  approve 3  reject 3      제안 확인·승인·거절
+ask 반도체 업황 어때?                Claude에게 질문(웹 검색 포함)
+/sm pos                             (DM 대신 슬래시 명령으로)
 ```
+
+텔레그램을 원하면 `notifier: telegram` + TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID.
+
+### Slack 앱 만들기 (5분)
+1. [api.slack.com/apps](https://api.slack.com/apps) → **Create New App** → **From an app manifest** → 워크스페이스 선택
+2. [deploy/slack-app-manifest.yaml](deploy/slack-app-manifest.yaml) 내용을 붙여넣고 생성 → **Install to Workspace**
+3. **OAuth & Permissions**의 `Bot User OAuth Token`(xoxb-...) → SLACK_BOT_TOKEN
+4. **Basic Information → App-Level Tokens → Generate**, scope `connections:write` → `xapp-...` → SLACK_APP_TOKEN
+5. Slack에서 내 프로필 → ⋮ → **멤버 ID 복사**(U...) → SLACK_USER_ID
 
 ## AWS 배포
 
 **추천 구성: EC2 t4g.small 1대(서울) + S3 + SSM.** 월 약 $17 (EC2 ~$15, EBS 20GB ~$2, S3 소액).
 
-- **EC2 (t4g.small)**: 전 종목 백필·백테스트에 메모리 2GB가 필요하고, 텔레그램 봇이 상시 돌아야 해서
+- **EC2 (t4g.small)**: 전 종목 백필·백테스트에 메모리 2GB가 필요하고, Slack 봇이 상시 돌아야 해서
   Lambda보다 단순합니다. 리전은 서울(기본)이면 충분합니다. 미국 데이터(Yahoo)와 Anthropic API는 어디서든 잘 됩니다.
   미국 리전을 원하면 `terraform apply -var region=us-east-1`.
 - **S3**: 릴리스 배포 + SQLite·원칙 파일 백업(작업마다, 버전 관리로 30일 보관).
-- **SSM Parameter Store**: API 키·봇 토큰 보관(SecureString). **SSM Session Manager**로 접속하므로 인바운드 포트가 하나도 없습니다.
+- **SSM Parameter Store**: 토큰 보관(SecureString). **SSM Session Manager**로 접속하고, Slack은 Socket Mode(서버가 바깥으로 연결)라 인바운드 포트가 하나도 없습니다.
 
 ```bash
 # 0) 비밀값 등록 (한 번만)
 # Claude 분석은 Claude 구독(Pro/Max)으로: 이 Mac에서 `claude setup-token` → 나온 토큰을 등록 (API 키 불필요)
 aws ssm put-parameter --region ap-northeast-2 --type SecureString --name /stockmining/CLAUDE_CODE_OAUTH_TOKEN --value '...'
 # (유료 API를 쓰려면 대신 /stockmining/ANTHROPIC_API_KEY 등록. 둘 다 없으면 Claude 분석만 건너뜀)
-aws ssm put-parameter --region ap-northeast-2 --type SecureString --name /stockmining/TELEGRAM_BOT_TOKEN --value '123:ABC...'
-aws ssm put-parameter --region ap-northeast-2 --type SecureString --name /stockmining/TELEGRAM_CHAT_ID  --value '123456789'
+aws ssm put-parameter --region ap-northeast-2 --type SecureString --name /stockmining/SLACK_BOT_TOKEN --value 'xoxb-...'
+aws ssm put-parameter --region ap-northeast-2 --type SecureString --name /stockmining/SLACK_APP_TOKEN --value 'xapp-...'
+aws ssm put-parameter --region ap-northeast-2 --type SecureString --name /stockmining/SLACK_USER_ID  --value 'U...'
 
 # 1) 인프라
 cd deploy/terraform && terraform init && terraform apply && cd ../..
@@ -81,19 +95,17 @@ journalctl -u stockmining@evening -n 100      # 서버에서
 systemctl list-timers 'stockmining*'
 ```
 
-텔레그램 봇은 @BotFather에서 `/newbot`으로 만들고, 봇에게 아무 메시지나 보낸 뒤
-`https://api.telegram.org/bot<TOKEN>/getUpdates`에서 `chat.id`를 확인하세요. 봇은 이 chat id 외의 메시지를 무시합니다.
 
 ## 로컬 실행
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'
-export ANTHROPIC_API_KEY=... TELEGRAM_BOT_TOKEN=... TELEGRAM_CHAT_ID=...   # 텔레그램 없으면 콘솔 출력
+export SLACK_BOT_TOKEN=... SLACK_APP_TOKEN=... SLACK_USER_ID=...   # 없으면 콘솔 출력
 .venv/bin/stockmining init            # 약 1,600종목 4년치 백필 + 기준 백테스트 (약 15분)
 .venv/bin/stockmining evening --force
 .venv/bin/stockmining test-rule my_rule.yaml
 .venv/bin/stockmining simulate        # 워크포워드 모의투자: 전략 선택 방식 비교 + 1년 성과 확률 + 무작위 기준선
-.venv/bin/stockmining cmd '/strats'   # 텔레그램 명령을 로컬에서
+.venv/bin/stockmining cmd 'strats'    # Slack 명령을 로컬에서
 .venv/bin/pytest
 ```
 
@@ -188,7 +200,7 @@ src/stockmining/
   journal.py    매매일지, 포지션, 원칙 위반 점검
   analyst.py    Claude (저녁 리뷰, 아침 웹 브리핑, 주간 리서치, /ask)
   jobs.py       배치 오케스트레이션, 제안 승인
-  bot.py        텔레그램 봇
+  bot.py        Slack(기본)·텔레그램 봇
 strategies/*.yaml   내장 전략 (출처 포함)
 principles.md       초기 원칙 (미국 스윙용. 운영 중에는 data/principles.md 가 갱신됨)
 deploy/             Terraform, systemd, 배포 스크립트

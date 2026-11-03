@@ -24,7 +24,7 @@ from . import regime as RG
 from . import rules as R
 from .config import ROOT, Config
 from .db import DB
-from .notify import Telegram
+from . import notify
 
 log = logging.getLogger(__name__)
 
@@ -33,7 +33,7 @@ class App:
     def __init__(self, cfg: Config):
         self.cfg = cfg
         self.db = DB(cfg.path("db_path"))
-        self.tg = Telegram(cfg.telegram_token, cfg.telegram_chat_id, cfg["telegram"]["enabled"])
+        self.tg = notify.make(cfg.raw)  # messenger: Slack (default) / Telegram / console
         self.tz = ZoneInfo(cfg["timezone"])
 
     # ------------------------------------------------------------------ helpers

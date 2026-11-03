@@ -54,7 +54,7 @@ DEFAULTS: dict[str, Any] = {
         "effort_research": "high",
         "web_search_max_uses": 8,
     },
-    "telegram": {"enabled": True},
+    "notifier": "slack",            # slack | telegram | console (secrets come from env, see notify.py)
 }
 
 MARKET_DEFAULTS: dict[str, dict[str, Any]] = {
@@ -144,14 +144,6 @@ class Config:
     @property
     def anthropic_api_key(self) -> str | None:
         return os.environ.get("ANTHROPIC_API_KEY")
-
-    @property
-    def telegram_token(self) -> str | None:
-        return os.environ.get("TELEGRAM_BOT_TOKEN")
-
-    @property
-    def telegram_chat_id(self) -> str | None:
-        return os.environ.get("TELEGRAM_CHAT_ID")
 
 
 def load_config(path: str | os.PathLike | None = None) -> Config:

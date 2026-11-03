@@ -119,7 +119,7 @@ def test_learning_log(tmp_path, monkeypatch):
     from stockmining.config import load_config
     from stockmining.jobs import App
     cfgp = tmp_path / "c.yaml"
-    cfgp.write_text(f"db_path: {tmp_path/'x.db'}\nprinciples_path: {tmp_path/'p.md'}\ntelegram: {{enabled: false}}\n")
+    cfgp.write_text(f"db_path: {tmp_path/'x.db'}\nprinciples_path: {tmp_path/'p.md'}\nnotifier: console\n")
     app = App(load_config(cfgp))
     out = app.save_learning("evening", {"new_insights": [{"kind": "hypothesis", "text": "저변동성 종목은 손실"}],
                                         "insight_updates": []})
@@ -129,3 +129,15 @@ def test_learning_log(tmp_path, monkeypatch):
                                  "insight_updates": [{"id": iid, "status": "confirmed", "note": "8개 전략에서 t<-2"}]})
     assert app.open_insights() == []
     assert app.db.query("SELECT COUNT(*) n FROM insights")[0]["n"] == 1
+
+
+def test_bot_accepts_commands_without_slash(tmp_path):
+    from stockmining.config import load_config
+    from stockmining.jobs import App
+    from stockmining import bot
+    cfgp = tmp_path / "c.yaml"
+    cfgp.write_text(f"db_path: {tmp_path/'x.db'}\nprinciples_path: {tmp_path/'p.md'}\nnotifier: console\n")
+    app = App(load_config(cfgp))
+    assert "기록: buy NVDA" in bot.handle(app, "buy nvda 180.5 0.5 test")   # Slack DM style, fractional qty
+    assert "NVDA" in bot.handle(app, "/pos")                                # Telegram style
+    assert "명령어" in bot.handle(app, "help")

@@ -12,6 +12,7 @@ dependencies = [
   "pyyaml>=6.0",
   "exchange_calendars>=4.5",
   "yfinance>=0.2.50",
+  "slack_sdk>=3.27",
 ]
 
 [project.optional-dependencies]

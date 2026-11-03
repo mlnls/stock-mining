@@ -1,4 +1,4 @@
-"""Trade journal (매매일지): real trades you report via Telegram, positions, discipline checks."""
+"""Trade journal (매매일지): real trades you report via the messenger, positions, discipline checks."""
 from __future__ import annotations
 
 from collections import defaultdict, deque

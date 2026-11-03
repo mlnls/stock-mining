@@ -1,7 +1,7 @@
 """Claude analyst: evening review, morning web briefing, weekly strategy research, ad-hoc questions.
 
 Claude never places orders and never edits principles directly: rule ideas become proposals that
-must pass the backtest gate and your /approve in Telegram.
+must pass the backtest gate and your approval in the messenger (Slack/Telegram).
 """
 from __future__ import annotations
 
@@ -37,7 +37,7 @@ SYSTEM_BASE = """당신은 {market} 스윙 트레이딩 시스템의 분석가�
 - 과최적화를 경계합니다. 표본이 적은(30건 미만) 성과는 '아직 판단 불가'로 다룹니다.
 - 원칙 수정은 '제안'만 합니다. 제안은 백테스트 게이트와 사용자 승인을 거쳐야 반영됩니다.
 - 수익을 보장하거나 확신하는 표현을 쓰지 않습니다. 손실 가능성과 손절 원칙을 항상 우선합니다.
-- 텔레그램으로 읽히므로 짧은 문단과 글머리표로, 마크다운 표 없이 한국어로 씁니다."""
+- 메신저(Slack)로 읽히므로 짧은 문단과 글머리표로, 마크다운 표 없이 한국어로 씁니다."""
 
 DSL_DOC = f"""규칙 명세(JSON) 형식:
 {R.__doc__}
@@ -211,7 +211,7 @@ def evening_report(cfg, principles: str, ctx: dict) -> dict:
 </data>
 
 다음을 작성하세요.
-1. report: 텔레그램용 저녁 리포트(1,500자 이내).
+1. report: 메신저용 저녁 리포트(1,500자 이내).
    - 시장 국면 한 줄
    - 내일 매수 후보(recommendations)마다: 근거 전략, 진입 기준가·손절가·목표가·수량, 주의할 점
    - 보유 포지션 경고(alerts)와 대응 원칙

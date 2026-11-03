@@ -1,5 +1,5 @@
 # Stock-Mining on AWS (Seoul): 1× EC2 t4g.small + S3 (releases/backups) + SSM (secrets & shell access).
-# No inbound ports: Telegram uses long polling, admin access is via SSM Session Manager.
+# No inbound ports: Slack Socket Mode / Telegram long polling connect out, admin access is via SSM Session Manager.
 
 terraform {
   required_version = ">= 1.6"
@@ -108,7 +108,7 @@ resource "aws_iam_instance_profile" "ec2" {
 # ---------------------------------------------------------------- network (default VPC, egress only)
 resource "aws_security_group" "this" {
   name        = "${var.name}-egress-only"
-  description = "No inbound. Outbound for market data, Anthropic API, Telegram, S3, SSM."
+  description = "No inbound. Outbound for market data, Claude, Slack, S3, SSM."
   egress {
     from_port   = 0
     to_port     = 0

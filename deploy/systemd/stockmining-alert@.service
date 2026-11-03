@@ -1,7 +1,10 @@
 [Unit]
-Description=Telegram alert for failed %i
+Description=Messenger alert for failed %i
 
 [Service]
 Type=oneshot
+User=stockmining
+Group=stockmining
 EnvironmentFile=/etc/stockmining/env
-ExecStart=/bin/bash -c 'curl -s -X POST "https://api.telegram.org/bot$${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="$${TELEGRAM_CHAT_ID}" --data-urlencode text="❌ %i 실패 — journalctl -u %i 확인"'
+Environment=PATH=/var/lib/stockmining/.local/bin:/usr/local/bin:/usr/bin:/bin:/snap/bin
+ExecStart=/opt/stockmining/.venv/bin/stockmining notify "❌ %i 실패 — 서버에서 journalctl -u %i 확인"

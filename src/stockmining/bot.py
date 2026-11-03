@@ -1,4 +1,5 @@
-"""Telegram bot (long polling — no inbound port needed). Only the configured chat is served."""
+"""Chat bot for Slack (Socket Mode) or Telegram (long polling). Both connect out from the server, so no
+inbound port is needed. Only the configured user (Slack) / chat (Telegram) is served."""
 from __future__ import annotations
 
 import json
@@ -13,7 +14,8 @@ from .jobs import App
 
 log = logging.getLogger(__name__)
 
-HELP = """명령어 (코드 = 티커, 예: NVDA)
+HELP = """명령어 (코드 = 티커, 예: NVDA). Slack에서는 봇 DM에 '/' 없이(buy NVDA 180 5) 또는 /sm buy ... 로
+
 /buy 코드 가격 수량 [메모]   매수 기록 (최근 추천이면 손절·목표 자동 연결)
 /sell 코드 가격 수량 [메모]  매도 기록
 /stop 코드 가격             손절가 수정
@@ -40,7 +42,10 @@ def _code(s: str, app: App) -> str | None:
 
 
 def handle(app: App, text: str) -> str:
-    parts = text.strip().split()
+    text = text.strip()
+    if text and not text.startswith("/"):
+        text = "/" + text  # Slack DMs: "buy NVDA 180 5" (Slack reserves leading "/" for its own commands)
+    parts = text.split()
     if not parts:
         return HELP
     cmd, args = parts[0].split("@")[0].lower(), parts[1:]
@@ -137,9 +142,54 @@ def handle(app: App, text: str) -> str:
 
 def run(app: App) -> None:
     if not app.tg.enabled:
-        raise SystemExit("TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID 가 필요합니다")
+        raise SystemExit(f"{app.tg.name} 메신저 설정(토큰/ID 환경변수)이 필요합니다")
+    if app.tg.name == "slack":
+        return run_slack(app)
+    return run_telegram(app)
+
+
+def run_slack(app: App) -> None:
+    from threading import Event
+
+    from slack_sdk.socket_mode import SocketModeClient
+    from slack_sdk.socket_mode.request import SocketModeRequest
+    from slack_sdk.socket_mode.response import SocketModeResponse
+
+    sl = app.tg
+    if not sl.app_token:
+        raise SystemExit("SLACK_APP_TOKEN(xapp-...) 이 필요합니다 (Socket Mode)")
+    allowed = str(sl.user_id)
+
+    def process(client: SocketModeClient, req: SocketModeRequest) -> None:
+        client.send_socket_mode_response(SocketModeResponse(envelope_id=req.envelope_id))  # ack within 3s
+        p = req.payload
+        if req.type == "slash_commands":
+            user, channel, text = p.get("user_id"), p.get("channel_id"), p.get("text", "") or "help"
+        elif req.type == "events_api":
+            ev = p.get("event", {})
+            if ev.get("type") != "message" or ev.get("bot_id") or ev.get("subtype"):
+                return
+            user, channel, text = ev.get("user"), ev.get("channel"), ev.get("text", "")
+        else:
+            return
+        if str(user) != allowed:
+            log.warning("ignored slack message from user %s", user)
+            return
+        try:
+            sl.send(handle(app, text), channel=channel if req.type == "events_api" else None)
+        except Exception:
+            log.error("slack handler failed\n%s", traceback.format_exc())
+
+    client = SocketModeClient(app_token=sl.app_token, web_client=sl.web)
+    client.socket_mode_request_listeners.append(process)
+    client.connect()
+    log.info("slack bot connected (socket mode)")
+    Event().wait()
+
+
+def run_telegram(app: App) -> None:
     offset = int(app.db.get("tg_offset", "0") or 0) or None
-    log.info("bot started")
+    log.info("telegram bot started")
     while True:
         try:
             updates = app.tg.updates(offset)
@@ -152,7 +202,7 @@ def run(app: App) -> None:
             app.db.set("tg_offset", str(offset))
             msg = u.get("message") or u.get("edited_message") or {}
             chat = str(msg.get("chat", {}).get("id", ""))
-            if chat != str(app.cfg.telegram_chat_id):
+            if chat != str(app.tg.chat_id):
                 log.warning("ignored message from chat %s", chat)
                 continue
             text = msg.get("text") or ""

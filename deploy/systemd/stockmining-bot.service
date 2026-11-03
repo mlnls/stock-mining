@@ -1,5 +1,5 @@
 [Unit]
-Description=stockmining Telegram bot
+Description=stockmining chat bot (Slack Socket Mode / Telegram)
 After=network-online.target
 Wants=network-online.target
 

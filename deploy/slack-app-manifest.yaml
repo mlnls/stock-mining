@@ -1,0 +1,33 @@
+# api.slack.com/apps → Create New App → From an app manifest → 워크스페이스 선택 → 아래 내용 붙여넣기
+display_information:
+  name: Stock Mining
+  description: 미국 주식 스윙 트레이딩 리포트·매매일지 봇
+features:
+  bot_user:
+    display_name: stockmining
+    always_online: true
+  app_home:
+    messages_tab_enabled: true
+    messages_tab_read_only_enabled: false
+  slash_commands:
+    - command: /sm
+      description: 매매일지·조회·승인 (예 /sm buy NVDA 180.5 5)
+      usage_hint: "buy NVDA 180.5 5 | sell ... | pos | recs | strats | approve 3 | help"
+      should_escape: false
+oauth_config:
+  scopes:
+    bot:
+      - chat:write
+      - im:history
+      - im:read
+      - im:write
+      - commands
+settings:
+  event_subscriptions:
+    bot_events:
+      - message.im
+  interactivity:
+    is_enabled: false
+  org_deploy_enabled: false
+  socket_mode_enabled: true
+  token_rotation_enabled: false

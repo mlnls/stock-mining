@@ -1,8 +1,10 @@
-# 복사해서 config.yaml 로 사용하세요. 비밀값(API 키, 토큰)은 여기 두지 말고 환경변수로 넣습니다.
-#   ANTHROPIC_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+# 복사해서 config.yaml 로 사용하세요. 비밀값(토큰)은 여기 두지 말고 환경변수(서버에선 SSM)로 넣습니다.
+#   Slack: SLACK_BOT_TOKEN(xoxb-), SLACK_APP_TOKEN(xapp-), SLACK_USER_ID(U...)
+#   Claude: CLAUDE_CODE_OAUTH_TOKEN(구독, `claude setup-token`) 또는 ANTHROPIC_API_KEY(유료 API)
 # 여기 없는 값은 src/stockmining/config.py 의 시장별 기본값을 씁니다.
 
 market: us                   # us(미국, 기본) | kr(한국)
+notifier: slack              # slack(기본) | telegram | console
 profile: normal              # normal(기본) | aggressive(공격형: 3종목 집중, 1회 손실 2%, 추세·돌파 4개 전략만)
                              # 프로필 값보다 아래에 직접 적은 값이 우선합니다
 
