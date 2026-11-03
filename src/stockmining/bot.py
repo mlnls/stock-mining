@@ -156,8 +156,9 @@ def run_slack(app: App) -> None:
     from slack_sdk.socket_mode.response import SocketModeResponse
 
     sl = app.tg
-    if not sl.app_token:
-        raise SystemExit("SLACK_APP_TOKEN(xapp-...) 이 필요합니다 (Socket Mode)")
+    token = sl.current_app_token()
+    if not token:
+        raise SystemExit("SLACK_APP_TOKEN(xapp-... 또는 xoxe.xapp-...) 이 필요합니다 (Socket Mode)")
     allowed = str(sl.user_id)
 
     def process(client: SocketModeClient, req: SocketModeRequest) -> None:
@@ -180,11 +181,13 @@ def run_slack(app: App) -> None:
         except Exception:
             log.error("slack handler failed\n%s", traceback.format_exc())
 
-    client = SocketModeClient(app_token=sl.app_token, web_client=sl.web)
+    client = SocketModeClient(app_token=token, web_client=sl.web)
     client.socket_mode_request_listeners.append(process)
     client.connect()
     log.info("slack bot connected (socket mode)")
-    Event().wait()
+    stop = Event()
+    while not stop.wait(600):  # rotating app tokens: refresh before expiry; reconnects use the new one
+        client.app_token = sl.current_app_token() or client.app_token
 
 
 def run_telegram(app: App) -> None:

@@ -4,8 +4,11 @@ Every backend connects *out* from the server, so no inbound port is ever needed.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
+import subprocess
+import time
 
 import requests
 
@@ -67,14 +70,49 @@ class Telegram:
 
 
 class Slack:
-    """Posts to the DM between the bot and ``user_id`` (opened on first use)."""
+    """Posts to the DM between the bot and ``user_id`` (opened on first use).
+
+    App-level tokens may be rotating (``xoxe.xapp-...`` + refresh token, expiring after ~12 h). Then the
+    refresh token, client id and client secret mint a new pair; the newest pair is kept in the DB (and
+    written back to SSM best-effort, because each refresh token works only once)."""
     name = "slack"
 
-    def __init__(self, bot_token: str | None, app_token: str | None, user_id: str | None):
+    def __init__(self, bot_token: str | None, app_token: str | None, user_id: str | None,
+                 refresh_token: str | None = None, client_id: str | None = None,
+                 client_secret: str | None = None, db=None):
         self.bot_token, self.app_token, self.user_id = bot_token, app_token, user_id
+        self.refresh_token, self.client_id, self.client_secret, self.db = refresh_token, client_id, client_secret, db
         self.enabled = bool(bot_token and user_id)
         self._web = None
         self._dm: str | None = None
+
+    def current_app_token(self) -> str | None:
+        """Valid app-level token, rotating it when it is missing or expires within 30 minutes."""
+        if not (self.refresh_token and self.client_id and self.client_secret):
+            return self.app_token
+        state = json.loads(self.db.get("slack_app_token") or "{}") if self.db else {}
+        if state.get("token") and state.get("expires_at", 0) - time.time() > 1800:
+            return state["token"]
+        from slack_sdk.web import WebClient
+        refresh = state.get("refresh") or self.refresh_token
+        try:
+            r = WebClient().oauth_v2_access(client_id=self.client_id, client_secret=self.client_secret,
+                                            grant_type="refresh_token", refresh_token=refresh)
+        except Exception as e:
+            log.error("slack app token rotation failed: %s", e)
+            return state.get("token") or self.app_token
+        state = {"token": r["access_token"], "refresh": r["refresh_token"],
+                 "expires_at": time.time() + int(r.get("expires_in", 43200))}
+        if self.db:
+            self.db.set("slack_app_token", json.dumps(state))
+        try:  # keep SSM's copy current so a rebuilt server can still rotate
+            subprocess.run(["aws", "ssm", "put-parameter", "--overwrite", "--type", "SecureString",
+                            "--name", "/stockmining/SLACK_APP_REFRESH_TOKEN", "--value", state["refresh"]],
+                           capture_output=True, timeout=30, check=False)
+        except Exception as e:
+            log.warning("could not write refresh token to SSM: %s", e)
+        log.info("slack app token rotated (expires in %ss)", r.get("expires_in"))
+        return state["token"]
 
     @property
     def web(self):
@@ -100,11 +138,12 @@ class Slack:
                 log.error("slack send failed: %s", e)
 
 
-def make(cfg: dict):
+def make(cfg: dict, db=None):
     kind = cfg.get("notifier", "slack")
     if kind == "slack":
-        return Slack(os.environ.get("SLACK_BOT_TOKEN"), os.environ.get("SLACK_APP_TOKEN"),
-                     os.environ.get("SLACK_USER_ID"))
+        e = os.environ.get
+        return Slack(e("SLACK_BOT_TOKEN"), e("SLACK_APP_TOKEN"), e("SLACK_USER_ID"),
+                     e("SLACK_APP_REFRESH_TOKEN"), e("SLACK_CLIENT_ID"), e("SLACK_CLIENT_SECRET"), db)
     if kind == "telegram":
         return Telegram(os.environ.get("TELEGRAM_BOT_TOKEN"), os.environ.get("TELEGRAM_CHAT_ID"))
     return Console()

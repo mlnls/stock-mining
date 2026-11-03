@@ -33,7 +33,7 @@ class App:
     def __init__(self, cfg: Config):
         self.cfg = cfg
         self.db = DB(cfg.path("db_path"))
-        self.tg = notify.make(cfg.raw)  # messenger: Slack (default) / Telegram / console
+        self.tg = notify.make(cfg.raw, self.db)  # messenger: Slack (default) / Telegram / console
         self.tz = ZoneInfo(cfg["timezone"])
 
     # ------------------------------------------------------------------ helpers

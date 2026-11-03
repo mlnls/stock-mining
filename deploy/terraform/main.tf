@@ -95,6 +95,12 @@ resource "aws_iam_role_policy" "app" {
         Effect   = "Allow"
         Action   = ["ssm:GetParametersByPath", "ssm:GetParameter", "ssm:GetParameters"]
         Resource = "arn:aws:ssm:${var.region}:${data.aws_caller_identity.me.account_id}:parameter/${var.name}/*"
+      },
+      {
+        # rotating Slack app tokens: each refresh token is single-use, so the newest one is written back
+        Effect   = "Allow"
+        Action   = ["ssm:PutParameter"]
+        Resource = "arn:aws:ssm:${var.region}:${data.aws_caller_identity.me.account_id}:parameter/${var.name}/SLACK_APP_REFRESH_TOKEN"
       }
     ]
   })
