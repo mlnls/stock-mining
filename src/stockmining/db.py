@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -137,8 +138,18 @@ class DB:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(self.path, timeout=60)
         self.conn.row_factory = sqlite3.Row
-        self.conn.execute("PRAGMA journal_mode=WAL")
-        self.conn.executescript(SCHEMA)
+        # Switching to WAL ignores the busy timeout, so two processes opening a fresh DB at once
+        # (bot + init right after install) can fail with "database is locked". WAL persists, so retry.
+        for attempt in range(30):
+            try:
+                if self.conn.execute("PRAGMA journal_mode").fetchone()[0].lower() != "wal":
+                    self.conn.execute("PRAGMA journal_mode=WAL")
+                self.conn.executescript(SCHEMA)
+                break
+            except sqlite3.OperationalError as e:
+                if "locked" not in str(e) or attempt == 29:
+                    raise
+                time.sleep(1)
 
     # ------------------------------------------------------------------ generic
     def execute(self, sql: str, params: Iterable[Any] = ()) -> sqlite3.Cursor:
