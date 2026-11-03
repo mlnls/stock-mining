@@ -2,6 +2,7 @@
 # Deploy to an existing Lightsail (or any Ubuntu) host over SSH — no S3/SSM on the server.
 # Secrets are read from SSM on THIS machine and piped to /etc/stockmining/env on the host.
 #   HOST=54.116.117.190 KEY=~/Downloads/LightsailDefaultKey-ap-northeast-2.pem ./deploy/lightsail.sh
+#   WEB_DOMAIN=stock.54-116-117-190.sslip.io ...  → also serve the dashboard through the host's Caddy
 set -euo pipefail
 cd "$(dirname "$0")/.."
 HOST="${HOST:?HOST=ip}"; KEY="${KEY:?KEY=path/to/key.pem}"; USER_="${SSH_USER:-ubuntu}"
@@ -19,7 +20,7 @@ aws ssm get-parameters-by-path --region "$REGION" --path /stockmining/ --with-de
   | awk -F'\t' '{n=$1; sub(".*/","",n); print n "=" $2}' \
   | "${SSH[@]}" 'umask 077; cat > /tmp/sm-secrets'
 
-"${SSH[@]}" 'set -e
+"${SSH[@]}" "WEB_DOMAIN='${WEB_DOMAIN:-}'; "'set -e
   sudo rm -rf /tmp/sm && mkdir -p /tmp/sm && tar xzf /tmp/sm.tgz -C /tmp/sm
-  sudo LOCAL=1 bash /tmp/sm/deploy/install.sh
+  sudo LOCAL=1 WEB_DOMAIN='"${WEB_DOMAIN:-}"' bash /tmp/sm/deploy/install.sh
   rm -f /tmp/sm.tgz /tmp/sm-secrets /tmp/sm-config.yaml'

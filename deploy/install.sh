@@ -74,7 +74,7 @@ chmod 0640 "$ETC"/*; chgrp stockmining "$ETC"/*
 install -m 0755 "$APP/deploy/backup.sh" /usr/local/bin/stockmining-backup
 cp "$APP"/deploy/systemd/*.service "$APP"/deploy/systemd/*.timer /etc/systemd/system/
 if [ -n "$LOCAL" ]; then  # shared host: cap jobs so the other services keep running
-  for u in stockmining@ stockmining-bot; do
+  for u in stockmining@ stockmining-bot stockmining-web; do
     mkdir -p "/etc/systemd/system/$u.service.d"
     cp "$APP/deploy/systemd/lightsail/limits.conf" "/etc/systemd/system/$u.service.d/limits.conf"
   done
@@ -83,6 +83,32 @@ systemctl daemon-reload
 systemctl enable --now stockmining-morning.timer stockmining-evening.timer stockmining-weekly.timer
 systemctl enable stockmining-bot.service
 systemctl restart stockmining-bot.service
+
+# 5b) web dashboard behind the host's existing Caddy (docker) — only when WEB_DOMAIN is given
+if [ -n "${WEB_DOMAIN:-}" ]; then
+  CADDY="${CADDY_CONTAINER:-more-mlnls-caddy-1}"
+  CADDYFILE="${CADDYFILE:-/srv/more-mlnls/deploy/Caddyfile}"
+  NET=$(docker inspect "$CADDY" -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{end}}' | awk '{print $1}')
+  GW=$(docker network inspect "$NET" -f '{{(index .IPAM.Config 0).Gateway}}')
+  touch "$ETC/web.env"
+  grep -q '^WEB_PASSWORD=' "$ETC/web.env" || echo "WEB_PASSWORD=$(openssl rand -base64 18 | tr -d '/+=')" >> "$ETC/web.env"
+  sed -i '/^WEB_HOST=/d;/^WEB_PORT=/d' "$ETC/web.env"
+  printf 'WEB_HOST=%s\nWEB_PORT=8787\n' "$GW" >> "$ETC/web.env"
+  chmod 0640 "$ETC/web.env"; chgrp stockmining "$ETC/web.env"
+  systemctl enable stockmining-web.service
+  systemctl restart stockmining-web.service
+  # replace our block between markers; write in place so the container's single-file bind mount sees it
+  cp "$CADDYFILE" "$CADDYFILE.bak.stockmining"
+  NEW=$(awk '/^# >>> stockmining/{skip=1} !skip{print} /^# <<< stockmining/{skip=0}' "$CADDYFILE")
+  printf '%s\n# >>> stockmining (stock-mining/deploy/install.sh 에서 관리)\n%s {\n\tencode zstd gzip\n\theader {\n\t\tX-Robots-Tag "noindex, nofollow"\n\t\t-Server\n\t}\n\treverse_proxy %s:8787\n}\n# <<< stockmining\n' \
+    "$NEW" "$WEB_DOMAIN" "$GW" > "$CADDYFILE"
+  if docker exec "$CADDY" caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>&1; then
+    docker exec "$CADDY" caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile
+    echo "dashboard: https://$WEB_DOMAIN"
+  else
+    echo "WARN: Caddyfile invalid — restoring backup"; cat "$CADDYFILE.bak.stockmining" > "$CADDYFILE"
+  fi
+fi
 
 # 6) first install: initial backfill + baseline backtests (≈5–10 min) in the background
 if [ ! -s "$DATA/stockmining.db" ] || ! sqlite3 "$DATA/stockmining.db" "select 1 from prices limit 1" | grep -q 1; then
