@@ -18,6 +18,8 @@ Feature names (N is an integer window):
   range body gap                        high-low, |close-open|, % gap open vs previous close
   up_days_N                             count of up closes in last N days
   xrank_<feature>                       cross-sectional percentile (0-100) of a feature across the universe that day
+  ml_score                              machine-learning score 0-100: daily percentile of a walk-forward gradient
+                                        boosting model's prediction of the next-10-day relative return (see ml.py)
 Functions: prev(x, n), cross_up(a, b), cross_down(a, b), abs(x), min(a, b), max(a, b)
 """
 from __future__ import annotations
@@ -32,7 +34,7 @@ import pandas as pd
 _FEATURE_RE = re.compile(
     r"^(sma|ema|vma|vavg|rsi|atr|natr|hh|ll|hc|lc|ret|vol_ratio|bbu|bbl|bbw|up_days)_(\d+)$"
 )
-_BASE = {"open", "high", "low", "close", "volume", "value", "range", "body", "gap"}
+_BASE = {"open", "high", "low", "close", "volume", "value", "range", "body", "gap", "ml_score"}
 _FUNCS = {"prev", "cross_up", "cross_down", "abs", "min", "max"}
 
 
@@ -67,7 +69,7 @@ def compute_feature(df: pd.DataFrame, name: str) -> pd.Series:
     """Compute (and cache in ``df``) a single per-ticker feature column."""
     if name in df.columns:
         return df[name]
-    if name.startswith("xrank_"):
+    if name.startswith("xrank_") or name == "ml_score":
         raise ExprError(f"{name} is cross-sectional; call add_cross_sectional() on the panel first")
     c = df["close"]
     if name == "range":
@@ -254,7 +256,11 @@ def _as_bool(v, df) -> pd.Series:
 # ---------------------------------------------------------------------------- panel helpers
 def add_cross_sectional(panel: dict[str, pd.DataFrame], exprs: list[str]) -> None:
     """Compute any ``xrank_*`` features referenced in ``exprs`` across the whole panel."""
-    needed = {n for e in exprs for n in names_in(e) if n.startswith("xrank_")}
+    names = {n for e in exprs for n in names_in(e)}
+    if "ml_score" in names or "xrank_ml_score" in names:
+        from . import ml
+        ml.add_ml_score(panel)
+    needed = {n for n in names if n.startswith("xrank_")}
     for name in needed:
         base = name[len("xrank_"):]
         wide = pd.DataFrame({code: compute_feature(df, base) for code, df in panel.items()})

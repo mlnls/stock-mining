@@ -12,6 +12,7 @@ STRATEGY_KO = {
     "squeeze_breakout": "변동성 수축 돌파",
     "volatility_breakout": "변동성 돌파",
     "volume_thrust": "거래량 급증",
+    "ml_rank": "AI 점수 상위",
 }
 REGIME_KO = {"bull": "상승장", "neutral": "보통", "bear": "하락장"}
 

@@ -153,3 +153,24 @@ def test_docfmt_parse_and_slack():
     txt = DF.to_slack({"headline": "결론", "picks": [{"code": "REPL", "decision": "hold", "reason": "실적"}],
                        "sections": [], "sources": []})
     assert txt.startswith("*결론*") and "⛔ *REPL* 보류" in txt
+
+
+def test_ml_score_walk_forward_has_no_early_predictions(monkeypatch):
+    import numpy as np
+    import pandas as pd
+    from stockmining import ml
+
+    rng = np.random.default_rng(1)
+    idx = pd.bdate_range("2020-01-01", periods=420)
+    panel = {}
+    for i in range(60):
+        c = 50 * np.exp(np.cumsum(rng.normal(0, 0.02, len(idx))))
+        panel[f"T{i}"] = pd.DataFrame({"open": c * (1 + rng.normal(0, .003, len(idx))), "high": c * 1.01,
+                                       "low": c * 0.99, "close": c, "volume": 1e6, "value": c * 1e6}, index=idx)
+    monkeypatch.setattr(ml, "MIN_ROWS", 1000)
+    ml.add_ml_score(panel)
+    s = panel["T0"]["ml_score"]
+    assert s.iloc[:ml.MIN_TRAIN].isna().all()          # no model before a year of history
+    later = s.iloc[ml.MIN_TRAIN:].dropna()
+    assert len(later) > 100 and later.between(0, 100).all()
+    assert "sma_200" not in panel["T0"].columns         # helper features are not cached on the panel
