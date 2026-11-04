@@ -361,8 +361,8 @@ padding:4px 8px;border-radius:8px;white-space:nowrap;pointer-events:none;font-va
 .plain li.note{display:block;border-bottom:1px solid var(--line);padding:12px 0}.plain li.note:last-child{border:0}
 .plain li.note small{display:block;color:var(--ink3);font-size:13px;margin-top:3px}
 .fold{border-top:1px solid var(--line)}.fold:first-of-type{border:0}
-.fold summary{list-style:none;display:flex;justify-content:space-between;align-items:center;padding:14px 0;font-weight:600;cursor:pointer;font-size:16px}
-.fold summary small{color:var(--ink3);font-weight:400;font-size:13px;margin-left:6px}
+.fold summary{list-style:none;display:flex;align-items:center;padding:14px 0;font-weight:600;cursor:pointer;font-size:16px}
+.fold summary small{color:var(--ink3);font-weight:400;font-size:13px;margin-left:8px}.fold summary .chev{margin-left:auto}
 footer{text-align:center;color:var(--ink3);font-size:12px;padding:8px 16px 32px}
 </style></head><body>
 <nav><div>{{nav}}</div></nav>
