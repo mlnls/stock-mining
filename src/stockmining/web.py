@@ -99,7 +99,8 @@ def report_html(body: str) -> str:
     t = re.sub(r"\[([^\]]+)\]\((https?://[^)\s]+)\)", r'<a href="\2" target="_blank" rel="noopener">\1</a>', t)
     t = re.sub(r"\*\*(.+?)\*\*|\*(\S[^*\n]*?)\*", lambda m: f"<b>{m.group(1) or m.group(2)}</b>", t)
     t = re.sub(r"(?m)^#{1,6}\s*(.+)$", r"<b>\1</b>", t)
-    t = re.sub(r"(?m)^\s*[-•]\s+(.+)$", r'<span class="li">\1</span>', t)
+    t = re.sub(r"(?m)^\s*[-•]\s+(.+)\n?", r'<span class="li">\1</span>', t)
+    t = re.sub(r"\n{3,}", "\n\n", t).strip()
     return f'<div class="report">{t}</div>'
 
 
@@ -204,8 +205,10 @@ def render(cfg: Config, db: DB) -> str:
             continue
         first = not tabs
         tabs += f'<button class="tab{" on" if first else ""}" data-tab="rep-{k}">{label}</button>'
-        panes += (f'<div class="pane{" on" if first else ""}" id="rep-{k}"><small class="when">'
-                  f'{h(r[0]["ts"][:16].replace("T", " "))}</small>{report_html(r[0]["body"])}</div>')
+        long_ = len(r[0]["body"]) > 700
+        panes += (f'<div class="pane{" on" if first else ""}{" clamp" if long_ else ""}" id="rep-{k}"><small class="when">'
+                  f'{h(r[0]["ts"][:16].replace("T", " "))}</small>{report_html(r[0]["body"])}'
+                  + ('<button class="more">전체 보기</button>' if long_ else "") + '</div>')
     rep_html = (f'<div class="tabs">{tabs}</div>{panes}' if tabs
                 else empty("📰", "아직 리포트가 없어요. 장이 열리는 날 아침·저녁에 생겨요."))
 
@@ -333,7 +336,10 @@ em.warn{background:var(--warnbg);color:var(--warn)}
 .kv small{color:var(--ink3);font-weight:400;font-size:13px}
 .row[open] .kv div{border-color:color-mix(in srgb,var(--ink3) 18%,transparent)}
 .hint,.desc{color:var(--ink2);font-size:14px;margin:12px 0 0}.desc{margin:0 0 4px}
-code{background:var(--card);padding:1px 6px;border-radius:6px;font-size:13px}
+code{background:var(--card);padding:1px 6px;border-radius:6px;font-size:13px;white-space:nowrap}
+.clamp .report{max-height:340px;overflow:hidden;-webkit-mask-image:linear-gradient(#000 70%,transparent)}
+.more{display:block;width:100%;margin-top:8px;border:0;background:var(--fill);color:var(--ink2);font:inherit;font-weight:600;
+padding:12px;border-radius:12px;cursor:pointer}
 .chart{position:relative;height:170px;margin:4px 0 6px;touch-action:pan-y}.chart svg{display:block;width:100%;height:100%;overflow:visible}
 .chart .ln{fill:none;stroke-width:2;stroke-linejoin:round;stroke-linecap:round}
 .chart .ref{stroke:var(--ink3);stroke-width:1;stroke-dasharray:4 4}.chart .reflbl{fill:var(--ink3);font-size:11px}
@@ -400,6 +406,8 @@ all();
 document.querySelectorAll(".tab").forEach(function(b){b.addEventListener("click",function(){
   document.querySelectorAll(".tab,.pane").forEach(function(x){x.classList.remove("on")});
   b.classList.add("on");document.getElementById(b.dataset.tab).classList.add("on")})});
+document.querySelectorAll(".more").forEach(function(b){b.addEventListener("click",function(){
+  b.parentNode.classList.remove("clamp");b.remove()})});
 var links=[].slice.call(document.querySelectorAll("nav a"));
 function spy(){var y=window.scrollY+90,cur=links[0];links.forEach(function(a){var s=document.querySelector(a.getAttribute("href"));
   if(s&&s.offsetTop<=y)cur=a});links.forEach(function(a){a.classList.toggle("on",a===cur)})}
