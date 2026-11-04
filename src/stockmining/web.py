@@ -1,9 +1,8 @@
 """Read-only web dashboard: ``stockmining web`` (stdlib HTTP server, server-rendered HTML).
 
-Shows the same things the Slack commands do (recs, positions, strategies, paper trades, reports, learning
-log, proposals). It never writes: the DB is opened read-only. Access needs HTTP basic auth with
-WEB_PASSWORD (user WEB_USER, default "me"); without a password the server refuses to start unless it only
-listens on localhost.
+Mobile-first list-and-card layout: big numbers first, tap a row to expand its chart and details. Korean
+colour convention (rise = red, fall = blue). The DB is opened read-only; access needs HTTP basic auth with
+WEB_PASSWORD (user WEB_USER, default "me"); without a password it only listens on localhost.
 """
 from __future__ import annotations
 
@@ -12,6 +11,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import sqlite3
 from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -32,14 +32,16 @@ class ReadOnlyDB(DB):
         self.conn.row_factory = sqlite3.Row
 
 
+# ---------------------------------------------------------------------------- formatting
 def h(v) -> str:
     return escape("" if v is None else str(v))
 
 
-def money(v, us: bool) -> str:
+def money(v, us: bool = True, sign: bool = False) -> str:
     if v is None:
         return "-"
-    return f"${v:,.2f}" if us else f"{v:,.0f}원"
+    s = ("+" if v > 0 else "-" if v < 0 else "") if sign else ("-" if v < 0 else "")
+    return f"{s}${abs(v):,.2f}" if us else f"{s}{abs(v):,.0f}원"
 
 
 def pct(v, digits: int = 1, sign: bool = True) -> str:
@@ -48,250 +50,362 @@ def pct(v, digits: int = 1, sign: bool = True) -> str:
     return f"{v:+.{digits}f}%" if sign else f"{v:.{digits}f}%"
 
 
-def pnl_cls(v) -> str:
-    return "" if v is None else ("up" if v > 0 else "down" if v < 0 else "")
+def tone(v) -> str:
+    """Korean convention: gain = red ("up"), loss = blue ("down")."""
+    return "" if v is None or v == 0 else ("up" if v > 0 else "down")
 
 
-def num(v, digits: int = 2) -> str:
-    return "-" if v is None else f"{v:.{digits}f}"
+def shares(q) -> str:
+    return "-" if q is None else f"{round(q, 2):g}주"
 
 
-def sparkline(closes: list[float], stop: float | None = None, w: int = 132, hgt: int = 34) -> str:
-    """Single-series 60-day close line; dashed line at the stop if it falls in range. Hover shows range."""
-    if len(closes) < 2:
+def chart(points: list[tuple[str, float]], stop: float | None = None, avg: float | None = None) -> str:
+    """Placeholder the page script turns into a responsive line chart with hover."""
+    if len(points) < 2:
         return ""
-    lo, hi = min(closes + ([stop] if stop else [])), max(closes)
-    span = (hi - lo) or 1
-    y = lambda v: round(hgt - 3 - (v - lo) / span * (hgt - 6), 1)  # noqa: E731
-    pts = " ".join(f"{round(i / (len(closes) - 1) * (w - 4) + 2, 1)},{y(c)}" for i, c in enumerate(closes))
-    stop_line = (f'<line x1="2" x2="{w - 2}" y1="{y(stop)}" y2="{y(stop)}" class="spark-stop"/>'
-                 if stop and lo <= stop <= hi else "")
-    lx, ly = pts.split()[-1].split(",")
-    tip = f"최근 {len(closes)}일 종가: 최저 {min(closes):,.2f} · 최고 {hi:,.2f} · 마지막 {closes[-1]:,.2f}"
-    if stop:
-        tip += f" · 점선 = 손절 {stop:,.2f}"
-    return (f'<svg class="spark" width="{w}" height="{hgt}" viewBox="0 0 {w} {hgt}" role="img" '
-            f'aria-label="{h(tip)}"><title>{h(tip)}</title>{stop_line}'
-            f'<polyline points="{pts}" class="spark-line"/><circle cx="{lx}" cy="{ly}" r="2.5" class="spark-dot"/></svg>')
+    data = {"d": [p[0] for p in points], "c": [round(p[1], 4) for p in points], "stop": stop, "avg": avg}
+    return f'<div class="chart" data-chart="{h(json.dumps(data))}"></div>'
 
 
-def closes_for(db: DB, codes: list[str], n: int = 60) -> dict[str, list[float]]:
-    out = {}
-    for c in codes:
-        rows = db.query("SELECT close FROM prices WHERE code=? ORDER BY date DESC LIMIT ?", (c, n))
-        out[c] = [r["close"] for r in reversed(rows) if r["close"] is not None]
-    return out
+def series(db: DB, code: str, n: int = 120) -> list[tuple[str, float]]:
+    rows = db.query("SELECT date, close FROM prices WHERE code=? AND close IS NOT NULL ORDER BY date DESC LIMIT ?",
+                    (code, n))
+    return [(r["date"], r["close"]) for r in reversed(rows)]
 
 
-def table(head: list[str], rows: list[list[str]], empty: str, num_cols: set[int] = frozenset()) -> str:
-    if not rows:
-        return f'<p class="empty">{h(empty)}</p>'
-    th = "".join(f'<th class="{"n" if i in num_cols else ""}">{h(x)}</th>' for i, x in enumerate(head))
-    body = "".join("<tr>" + "".join(f'<td class="{"n" if i in num_cols else ""}">{c}</td>' for i, c in enumerate(r))
-                   + "</tr>" for r in rows)
-    return f'<div class="tw"><table><thead><tr>{th}</tr></thead><tbody>{body}</tbody></table></div>'
+def kv(items: list[tuple[str, str]]) -> str:
+    return '<dl class="kv">' + "".join(f"<div><dt>{k}</dt><dd>{v}</dd></div>" for k, v in items) + "</dl>"
 
 
-STATUS = {"active": "사용 중", "muted": "음소거", "retired": "퇴역"}
+def avatar(code: str) -> str:
+    return f'<span class="av">{h(code[:4])}</span>'
 
 
+def row(code: str, title: str, sub: str, right: str, right_sub: str, body: str, open_: bool = False) -> str:
+    return (f'<details class="row"{" open" if open_ else ""}><summary>{avatar(code)}'
+            f'<span class="rt"><b>{title}</b><small>{sub}</small></span>'
+            f'<span class="rr"><b>{right}</b><small>{right_sub}</small></span><i class="chev"></i></summary>'
+            f'<div class="rb">{body}</div></details>')
+
+
+def empty(icon: str, text: str) -> str:
+    return f'<div class="empty"><span>{icon}</span>{h(text)}</div>'
+
+
+def report_html(body: str) -> str:
+    """Slack-style text → light HTML: *bold*, <url|label> / [label](url) links, '•'/'-' bullets."""
+    t = h(body)
+    t = re.sub(r"&lt;(https?://[^|&]+)\|([^&]+)&gt;", r'<a href="\1" target="_blank" rel="noopener">\2</a>', t)
+    t = re.sub(r"\[([^\]]+)\]\((https?://[^)\s]+)\)", r'<a href="\2" target="_blank" rel="noopener">\1</a>', t)
+    t = re.sub(r"\*\*(.+?)\*\*|\*(\S[^*\n]*?)\*", lambda m: f"<b>{m.group(1) or m.group(2)}</b>", t)
+    t = re.sub(r"(?m)^#{1,6}\s*(.+)$", r"<b>\1</b>", t)
+    t = re.sub(r"(?m)^\s*[-•]\s+(.+)$", r'<span class="li">\1</span>', t)
+    return f'<div class="report">{t}</div>'
+
+
+STATUS = {"active": "사용 중", "muted": "쉬는 중", "retired": "퇴역"}
+
+
+# ---------------------------------------------------------------------------- page
 def render(cfg: Config, db: DB) -> str:
     us = cfg.is_us
     info = db.ticker_info()
     name = lambda c: info.get(c, {}).get("name") or c  # noqa: E731
     ctx = json.loads(db.get("last_evening_ctx") or "{}")
-    last_day = db.last_price_date()
+    last_day = db.last_price_date() or ""
+    acct, cap = cfg["account"], cfg["account"].get("capital") or 0
 
-    # ---- header facts
-    idx = db.load_index(cfg["regime_index"])
     from . import regime as RG
+    idx = db.load_index(cfg["regime_index"])
     market = RG.describe(idx) if not idx.empty else {}
-    acct = cfg["account"]
-    facts = [
-        ("데이터 기준일", h(last_day or "-")),
-        ("시장 국면", f'{h(LB.regime(market.get("regime")))}'
-                    f'<small>{h("S&P500" if us else cfg["regime_index"])} 최근 한 달 {pct(market.get("chg_20d_pct"))}</small>'),
-        ("운용 자금", money(acct.get("capital"), us)),
-        ("투자 성향", h({"aggressive": "공격형", "normal": "기본형"}.get(cfg["profile"], cfg["profile"]))),
-    ]
-    facts_html = "".join(f'<div class="fact"><span>{k}</span><b>{v}</b></div>' for k, v in facts)
 
-    # ---- recommendations
-    rdate = db.query("SELECT MAX(date) d FROM recommendations")[0]["d"]
-    recs = db.query("SELECT * FROM recommendations WHERE date=? ORDER BY combined_score DESC", (rdate,)) if rdate else []
-    closes = closes_for(db, [r["code"] for r in recs])
-    rec_rows = []
-    for r in recs:
-        risk = (r["entry_ref"] - r["stop"]) * r["shares"] if r["entry_ref"] and r["stop"] and r["shares"] else None
-        rec_rows.append([
-            f'<b>{h(r["code"])}</b><small>{h(name(r["code"]))}</small>', h(LB.strat(r["strategy"])),
-            sparkline(closes.get(r["code"], []), r["stop"]),
-            money(r["entry_ref"], us), money(r["stop"], us), money(r["target"], us),
-            (f'{round(r["shares"], 2):g}주<small>≈ {money(r["shares"] * r["entry_ref"], us)}</small>'
-             if r["shares"] and r["entry_ref"] else h(r["shares"])),
-            money(risk, us),
-            f'<span class="tag warn">⛔ 보류</span> {h(r["flagged"])}' if r["flagged"] else '<span class="tag">후보</span>'])
-    recs_html = table(["종목", "고른 이유", "최근 60일", "살 가격", "손절가", "목표가", "수량", "틀리면 최대 손실", "상태"], rec_rows,
-                      "아직 추천이 없어요. 첫 저녁 배치 후 채워집니다.", {3, 4, 5, 6, 7})
-
-    # ---- positions & round trips
+    # ---- holdings
     pos, trips = J.positions_and_roundtrips(db)
     if pos:
         J.position_alerts(pos, db.load_panel(list(pos), None))
-    pcl = closes_for(db, list(pos))
-    pos_rows = [[
-        f'<b>{h(c)}</b><small>{h(name(c))}</small>', sparkline(pcl.get(c, []), p["plan_stop"]), h(p["qty"]),
-        money(p["avg_price"], us), money(p.get("last_close"), us),
-        f'<span class="{pnl_cls(p.get("pnl_pct"))}">{pct(p.get("pnl_pct"), 2)}</span>',
-        money(p["plan_stop"], us) if p["plan_stop"] else '<span class="tag warn">미설정</span>',
-        money(p["plan_target"], us), h(LB.strat(p["strategy"])), h(p["first_buy"])] for c, p in pos.items()]
-    pos_html = table(["종목", "최근 60일", "수량", "평단", "종가", "손익", "손절", "목표", "전략", "첫 매수"], pos_rows,
-                     "보유 종목이 없어요. 슬랙에서 buy 티커 가격 수량 으로 기록하면 여기 나타나요.", {2, 3, 4, 5, 6, 7})
-    trip_rows = [[h(t["sell_date"]), f'<b>{h(t["code"])}</b>', h(t["qty"]), money(t["buy"], us), money(t["sell"], us),
-                  f'<span class="{pnl_cls(t["ret_pct"])}">{pct(t["ret_pct"], 2)}</span>', h(LB.strat(t["strategy"])),
-                  h(t["sell_note"] or "")] for t in reversed(trips[-20:])]
-    trips_html = table(["매도일", "종목", "수량", "매수가", "매도가", "수익률", "전략", "메모"], trip_rows,
-                       "완료된 매매가 아직 없어요.", {2, 3, 4, 5})
+    value = sum(p["qty"] * (p.get("last_close") or p["avg_price"]) for p in pos.values())
+    cost = sum(p["qty"] * p["avg_price"] for p in pos.values())
+    pnl = value - cost if pos else None
+    realized = sum((t["sell"] - t["buy"]) * t["qty"] for t in trips if t["sell"] and t["buy"])
+
+    # ---- hero
+    d = last_day[5:].replace("-", "/") if last_day else ""
+    hero_sub = (f'<span class="{tone(pnl)}">{money(pnl, us, True)} ({pct(pnl / cost * 100 if cost else 0, 2)})</span>'
+                f' · 보유 {len(pos)}종목' if pos else "아직 보유한 종목이 없어요")
+    chips = [f'시장 <b>{h(LB.regime(market.get("regime")))}</b>',
+             f'{"S&P500" if us else h(cfg["regime_index"])} 한 달 '
+             f'<b class="{tone(market.get("chg_20d_pct"))}">{pct(market.get("chg_20d_pct"))}</b>',
+             f'<b>{h({"aggressive": "공격형", "normal": "기본형"}.get(cfg["profile"], cfg["profile"]))}</b>']
+    if trips:
+        chips.append(f'실현 손익 <b class="{tone(realized)}">{money(realized, us, True)}</b>')
+    hero = (f'<section class="hero"><small>{h(d)} 장 마감 기준</small><span>운용 자금</span>'
+            f'<b class="big">{money(cap, us)}</b><p>{hero_sub}</p>'
+            f'<div class="chips">{"".join(f"<span>{c}</span>" for c in chips)}</div></section>')
+
+    alerts = "".join(f'<div class="alert">{h(a)}</div>' for a in ctx.get("alerts") or [])
+
+    # ---- tomorrow's candidates
+    rdate = db.query("SELECT MAX(date) d FROM recommendations")[0]["d"]
+    recs = db.query("SELECT * FROM recommendations WHERE date=? ORDER BY combined_score DESC", (rdate,)) if rdate else []
+    earn = {r["code"]: r.get("next_earnings") for r in ctx.get("recommendations", [])}
+    rec_html = ""
+    for i, r in enumerate(recs):
+        pts = series(db, r["code"])
+        chg = (pts[-1][1] / pts[-60][1] - 1) * 100 if len(pts) >= 60 else None
+        price, stop, q = r["entry_ref"], r["stop"], r["shares"]
+        need = price * q if price and q else None
+        risk = (price - stop) * q if price and stop and q else None
+        drop = (stop / price - 1) * 100 if price and stop else None
+        items = [("살 가격", f"{money(price, us)} 근처"),
+                 ("손절가", f'{money(stop, us)} <small class="down">{pct(drop, 1)}</small>'),
+                 ("목표가", money(r["target"], us) if r["target"] else "없음 · 오르는 동안 보유"),
+                 ("수량", shares(q)),
+                 ("필요한 돈", f"{money(need, us)}" + (f" <small>내 돈의 {need / cap:.0%}</small>" if need and cap else "")),
+                 ("틀리면 최대", f'<span class="down">{money(-risk if risk else None, us)}</span>'
+                  + (f" <small>내 돈의 {risk / cap:.0%}</small>" if risk and cap else ""))]
+        if earn.get(r["code"]):
+            items.append(("다음 실적 발표", h(earn[r["code"]])))
+        flag = (f'<div class="alert">⛔ 아침 브리핑에서 보류 권고: {h(r["flagged"])}</div>' if r["flagged"] else "")
+        body = (flag + chart(pts, stop) + kv(items) +
+                '<p class="hint">지정가로 사고, 크게 갭상승해서 시작하면 쫓아가지 마세요. 사면 슬랙에 '
+                f'<code>buy {h(r["code"])} 가격 수량</code> 으로 기록하세요.</p>')
+        sub = h(LB.strat(r["strategy"])) + (' · <em class="warn">보류</em>' if r["flagged"] else "")
+        rec_html += row(r["code"], f'{h(r["code"])} <small class="nm">{h(name(r["code"]))}</small>', sub,
+                        money(price, us), f'<span class="{tone(chg)}">3개월 {pct(chg)}</span>' if chg is not None else "",
+                        body, open_=(i == 0))
+    rec_html = rec_html or empty("😴", "내일 살 종목이 없어요. 쉬어 가는 날이에요.")
+
+    # ---- my stocks
+    pos_html = ""
+    for c, p in pos.items():
+        last = p.get("last_close")
+        v = p["qty"] * (last or p["avg_price"])
+        items = [("수량", shares(p["qty"])), ("평균 산 가격", money(p["avg_price"], us)), ("현재가", money(last, us)),
+                 ("손절가", money(p["plan_stop"], us) if p["plan_stop"] else '<em class="warn">미설정 · 꼭 정하세요</em>'),
+                 ("목표가", money(p["plan_target"], us)), ("고른 이유", h(LB.strat(p["strategy"]))),
+                 ("처음 산 날", h(p["first_buy"]))]
+        pos_html += row(c, f'{h(c)} <small class="nm">{h(name(c))}</small>', shares(p["qty"]), money(v, us),
+                        f'<span class="{tone(p.get("pnl_pct"))}">{money((last - p["avg_price"]) * p["qty"] if last else None, us, True)}'
+                        f' ({pct(p.get("pnl_pct"), 2)})</span>', chart(series(db, c), p["plan_stop"], p["avg_price"]) + kv(items))
+    pos_html = pos_html or empty("📭", "보유 종목이 없어요. 사면 슬랙에 buy 티커 가격 수량 으로 기록하세요.")
+    trip_html = "".join(
+        f'<li><span>{avatar(t["code"])}<span class="rt"><b>{h(t["code"])}</b><small>{h(t["sell_date"])} 매도 · '
+        f'{shares(t["qty"])}</small></span></span><b class="{tone(t["ret_pct"])}">{pct(t["ret_pct"], 2)}</b></li>'
+        for t in reversed(trips[-15:]))
+    if trip_html:
+        pos_html += f'<h3>판 기록</h3><ul class="plain">{trip_html}</ul>'
+
+    # ---- reports
+    kinds = {"evening": "저녁 리포트", "morning": "아침 브리핑", "weekly": "주간 학습", "ask": "질문 답변"}
+    tabs, panes = "", ""
+    for k, label in kinds.items():
+        r = db.query("SELECT * FROM reports WHERE kind=? ORDER BY id DESC LIMIT 1", (k,))
+        if not r:
+            continue
+        first = not tabs
+        tabs += f'<button class="tab{" on" if first else ""}" data-tab="rep-{k}">{label}</button>'
+        panes += (f'<div class="pane{" on" if first else ""}" id="rep-{k}"><small class="when">'
+                  f'{h(r[0]["ts"][:16].replace("T", " "))}</small>{report_html(r[0]["body"])}</div>')
+    rep_html = (f'<div class="tabs">{tabs}</div>{panes}' if tabs
+                else empty("📰", "아직 리포트가 없어요. 장이 열리는 날 아침·저녁에 생겨요."))
 
     # ---- strategies
     weights = ctx.get("weights", {})
-    strat_rows = []
-    for s in db.strategies(("active", "muted", "retired")):
+    strat_html = ""
+    strats = db.strategies(("active", "muted", "retired"))
+    strats.sort(key=lambda s: -((s["backtest"] or {}).get("full", {}).get("expectancy_pct") or -99))
+    for s in strats:
         bt = s["backtest"] or {}
         f, o = bt.get("full", {}), bt.get("oos", {})
-        p = db.query("SELECT COUNT(*) n, AVG(ret_pct) a, AVG(ret_pct>0)*100 w FROM paper_trades "
-                     "WHERE strategy=? AND status='closed'", (s["name"],))[0]
-        po = db.query("SELECT COUNT(*) n FROM paper_trades WHERE strategy=? AND status IN ('open','pending')",
-                      (s["name"],))[0]["n"]
         pf, opf = f.get("profit_factor"), o.get("profit_factor")
         if pf and pf >= 1.2 and (opf or 0) >= 1.1:
-            verdict = '<span class="tag good">👍 좋음</span>'
+            verdict = '<em class="good">좋음</em>'
         elif pf and pf >= 1.0:
-            verdict = '<span class="tag">보통</span>'
-        elif pf:
-            verdict = '<span class="tag bad">👎 안 좋음</span>'
+            verdict = '<em>보통</em>'
         else:
-            verdict = "-"
-        strat_rows.append([
-            f'<b>{h(LB.strat(s["name"]))}</b><small>{h((s["spec"].get("description") or "").strip()[:80])}</small>',
-            verdict,
-            f'<span class="{pnl_cls(f.get("expectancy_pct"))}">{pct(f.get("expectancy_pct"), 2)}</span>',
-            pct(f.get("win_rate"), 0, False),
-            f'<span class="{pnl_cls(o.get("expectancy_pct"))}">{pct(o.get("expectancy_pct"), 2)}</span>',
-            pct(f.get("mdd_pct"), 0, False),
-            f'{p["n"]}번 · <span class="{pnl_cls(p["a"])}">{pct(p["a"], 2)}</span>' + (f'<small>진행 중 {po}</small>' if po else ""),
-            f'<span class="tag {"" if s["status"] == "active" else "mute"}">{h(STATUS.get(s["status"], s["status"]))}</span>'
-            + (f'<small>비중 {weights[s["name"]]:.0%}</small>' if weights.get(s["name"]) else ""),
-        ])
-    strat_html = table(["전략", "과거 성적", "한 번 거래 평균", "이긴 비율", "최근 성적", "최악 하락", "가상 매매", "상태"],
-                       strat_rows, "전략이 없어요.", {2, 3, 4, 5})
+            verdict = '<em class="bad">안 좋음</em>' if pf else ""
+        p = db.query("SELECT COUNT(*) n, AVG(ret_pct) a FROM paper_trades WHERE strategy=? AND status='closed'",
+                     (s["name"],))[0]
+        po = db.query("SELECT COUNT(*) n FROM paper_trades WHERE strategy=? AND status IN ('open','pending')",
+                      (s["name"],))[0]["n"]
+        items = [("이긴 비율", pct(f.get("win_rate"), 0, False)), ("거래 횟수", f'{f.get("trades", "-")}번'),
+                 ("최근 성적", f'<span class="{tone(o.get("expectancy_pct"))}">{pct(o.get("expectancy_pct"), 2)}</span> <small>한 번 평균</small>'),
+                 ("최악일 때 하락", f'<span class="down">{pct(-(f.get("mdd_pct") or 0), 0)}</span>'),
+                 ("가상 매매", f'{p["n"]}번 끝 · {po}번 진행 중' + (f' · 평균 <span class="{tone(p["a"])}">{pct(p["a"], 2)}</span>' if p["n"] else "")),
+                 ("상태", STATUS.get(s["status"], s["status"]) + (f' · 지금 비중 {weights[s["name"]]:.0%}' if weights.get(s["name"]) else ""))]
+        body = f'<p class="desc">{h((s["spec"].get("description") or "").strip())}</p>' + kv(items)
+        strat_html += row(LB.strat(s["name"])[:2], h(LB.strat(s["name"])), f"{verdict} 이긴 비율 {pct(f.get('win_rate'), 0, False)}",
+                          f'<span class="{tone(f.get("expectancy_pct"))}">{pct(f.get("expectancy_pct"), 2)}</span>',
+                          "한 번 거래 평균", body)
+    strat_html = (f'<p class="lead">과거 5년 데이터로 시험해 본 결과예요. 오른쪽 숫자는 이 방식으로 한 번 사고팔 때 평균 수익이에요.</p>'
+                  + strat_html) if strat_html else empty("🧪", "전략이 없어요.")
 
-    # ---- paper trades
+    # ---- more: paper trades, learning log, proposals, edge map
     paper = db.query("SELECT * FROM paper_trades WHERE status IN ('open','pending') ORDER BY signal_date DESC LIMIT 30")
-    paper_closed = db.query("SELECT * FROM paper_trades WHERE status='closed' ORDER BY exit_date DESC LIMIT 30")
-    paper_rows = [[h(p["signal_date"]), f'<b>{h(p["code"])}</b>', h(LB.strat(p["strategy"])),
-                   h("대기" if p["status"] == "pending" else "보유"), money(p["entry_price"], us), money(p["stop"], us),
-                   money(p["target"], us)] for p in paper]
-    paper_html = table(["신호일", "종목", "전략", "상태", "진입가", "손절", "목표"], paper_rows,
-                       "진행 중인 가상 매매가 없어요.", {4, 5, 6})
-    pc_rows = [[h(p["exit_date"]), f'<b>{h(p["code"])}</b>', h(LB.strat(p["strategy"])), money(p["entry_price"], us),
-                money(p["exit_price"], us), f'<span class="{pnl_cls(p["ret_pct"])}">{pct(p["ret_pct"], 2)}</span>',
-                h(p["exit_reason"])] for p in paper_closed]
-    pc_html = table(["청산일", "종목", "전략", "진입가", "청산가", "수익률", "사유"], pc_rows, "아직 청산된 가상 매매가 없어요.",
-                    {3, 4, 5})
-
-    # ---- reports
-    kinds = {"evening": "저녁 리포트", "morning": "아침 브리핑", "weekly": "주간 학습", "ask": "질문"}
-    rep_html = ""
-    for k, label in kinds.items():
-        r = db.query("SELECT * FROM reports WHERE kind=? ORDER BY id DESC LIMIT 1", (k,))
-        if r:
-            rep_html += (f'<details {"open" if not rep_html else ""}><summary>{label}<small>{h(r[0]["ts"][:16].replace("T", " "))}'
-                         f'</small></summary><div class="report">{h(r[0]["body"])}</div></details>')
-    rep_html = rep_html or '<p class="empty">아직 리포트가 없어요. 오늘 밤 아침 브리핑, 내일 아침 저녁 리포트가 생겨요.</p>'
-
-    # ---- insights / proposals / edge
-    icon = {"open": "⏳ 검증 중", "confirmed": "✅ 확인", "rejected": "❌ 기각"}
-    kind_ko = {"observation": "관찰", "hypothesis": "가설", "lesson": "교훈"}
+    closed = db.query("SELECT * FROM paper_trades WHERE status='closed' ORDER BY exit_date DESC LIMIT 30")
+    li = lambda code, t, sub, right: (f'<li><span>{avatar(code)}<span class="rt"><b>{t}</b><small>{sub}</small></span></span>'  # noqa: E731
+                                      f'{right}</li>')
+    paper_html = "".join(li(p["code"], h(p["code"]), f'{h(LB.strat(p["strategy"]))} · {h(p["signal_date"])}',
+                            f'<small>{"사기 전" if p["status"] == "pending" else "들고 있음"}</small>') for p in paper)
+    paper_html += "".join(li(p["code"], h(p["code"]), f'{h(LB.strat(p["strategy"]))} · {h(p["exit_date"])} 정리',
+                             f'<b class="{tone(p["ret_pct"])}">{pct(p["ret_pct"], 2)}</b>') for p in closed)
+    paper_html = (f'<ul class="plain">{paper_html}</ul>' if paper_html
+                  else empty("🎮", "가상 매매 기록이 아직 없어요. 매일 저녁 자동으로 쌓여요."))
+    status_ko = {"open": "확인 중", "confirmed": "맞았음", "rejected": "틀렸음"}
     ins = db.query("SELECT * FROM insights ORDER BY id DESC LIMIT 30")
-    ins_html = "".join(
-        f'<li><span class="tag {"" if i["status"] == "confirmed" else "mute" if i["status"] == "rejected" else ""}">'
-        f'{icon.get(i["status"], i["status"])}</span> <b>{h(kind_ko.get(i["kind"], i["kind"]))}</b> {h(i["text"])}'
-        + (f'<small>→ {h(i["note"])}</small>' if i["note"] else "") + f'<small>{h(i["ts"][:10])}</small></li>'
-        for i in ins) or '<p class="empty">학습 일지가 아직 비어 있어요.</p>'
-    if ins:
-        ins_html = f'<ul class="list">{ins_html}</ul>'
+    ins_html = "".join(f'<li class="note"><em class="{ {"confirmed": "good", "rejected": "bad"}.get(i["status"], "")}">'
+                       f'{status_ko.get(i["status"], i["status"])}</em> {h(i["text"])}'
+                       + (f'<small>→ {h(i["note"])}</small>' if i["note"] else "") + f'<small>{h(i["ts"][:10])}</small></li>'
+                       for i in ins)
+    ins_html = f'<ul class="plain">{ins_html}</ul>' if ins else empty("📒", "시스템이 배운 것이 아직 없어요.")
     props = db.query("SELECT * FROM proposals WHERE status='pending' ORDER BY id")
-    prop_html = "".join(
-        f'<li><b>#{p["id"]} [{h(p["kind"])}] {h(p["title"])}</b><small>{h((p["rationale"] or "")[:400])}</small>'
-        f'<small>슬랙에서 <code>approve {p["id"]}</code> 또는 <code>reject {p["id"]}</code></small></li>' for p in props)
-    prop_html = f'<ul class="list">{prop_html}</ul>' if props else '<p class="empty">승인 대기 중인 제안이 없어요.</p>'
+    prop_html = "".join(f'<li class="note"><b>#{p["id"]} {h(p["title"])}</b><small>{h((p["rationale"] or "")[:400])}</small>'
+                        f'<small>슬랙에서 <code>approve {p["id"]}</code> 또는 <code>reject {p["id"]}</code></small></li>'
+                        for p in props)
+    prop_html = f'<ul class="plain">{prop_html}</ul>' if props else empty("✅", "승인할 제안이 없어요.")
     edge = db.get("edge_summary")
-    edge_html = f'<div class="report">{h(edge)}</div>' if edge else '<p class="empty">엣지 맵은 토요일 주간 학습 후에 생겨요.</p>'
-
-    alerts = ctx.get("alerts") or []
-    alert_html = "".join(f'<div class="alert">{h(a)}</div>' for a in alerts)
+    edge_html = report_html(edge) if edge else empty("🗺️", "토요일 주간 학습 뒤에 생겨요.")
+    more = "".join(f'<details class="fold"><summary>{t}<i class="chev"></i></summary><div>{c}</div></details>' for t, c in [
+        ("가상 매매 <small>돈 없이 매일 따라 해 본 기록</small>", paper_html),
+        ("학습 일지 <small>시스템이 배운 것</small>", ins_html),
+        (f"승인 대기 제안 <small>{len(props)}개</small>", prop_html),
+        ("엣지 맵 <small>어떤 조건에서 벌고 잃는지</small>", edge_html)])
 
     sections = [
-        ("recs", f"추천 종목 <small>{h(rdate or '')} 장 마감 기준 · 다음 거래일 매수 후보</small>", recs_html),
-        ("pos", "보유 포지션", pos_html + "<h3>최근 완료 매매</h3>" + trips_html),
-        ("reports", "리포트", rep_html),
-        ("strats", "전략 성적표 <small>과거 5년 데이터로 시험한 결과 · 가상 매매 = 실제 돈 없이 매일 따라 해 본 결과</small>", strat_html),
-        ("paper", "가상 매매", "<h3>진행 중</h3>" + paper_html + "<h3>최근 청산</h3>" + pc_html),
-        ("learn", "학습 일지", ins_html),
-        ("props", "승인 대기 제안", prop_html),
-        ("edge", "엣지 맵", edge_html),
+        ("recs", "내일 살 후보", f"{len(recs)}개" if recs else "", rec_html),
+        ("mine", "내 주식", f"{len(pos)}종목" if pos else "", pos_html),
+        ("reports", "리포트", "", rep_html),
+        ("strats", "전략 성적표", f"{len(strats)}개", strat_html),
+        ("more", "더 보기", "", more),
     ]
-    nav = "".join(f'<a href="#{i}">{t.split(" <")[0]}</a>' for i, t, _ in sections)
-    body = "".join(f'<section id="{i}"><h2>{t}</h2>{c}</section>' for i, t, c in sections)
-    return PAGE.format(facts=facts_html, nav=nav, body=body, alerts=alert_html)
+    nav = "".join(f'<a href="#{i}">{t}</a>' for i, t, _, _ in sections)
+    body = "".join(f'<section class="card" id="{i}"><h2>{t} <small>{n}</small></h2>{c}</section>' for i, t, n, c in sections)
+    return PAGE.replace("{{nav}}", nav).replace("{{hero}}", hero + alerts).replace("{{body}}", body)
 
 
 PAGE = """<!doctype html>
-<html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="robots" content="noindex,nofollow"><title>Stock Mining</title>
+<html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="robots" content="noindex,nofollow"><meta name="theme-color" content="#f2f4f6"><title>Stock Mining</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
 <style>
-:root{{color-scheme:light;--bg:#f6f6f4;--card:#fcfcfb;--line:#e4e3df;--ink:#0b0b0b;--ink2:#52514e;--ink3:#8a8984;
---accent:#2a78d6;--up:#0f7b3f;--down:#c4312f;--warn:#9a5b00;--warnbg:#fdf1dc;--tag:#eceae5}}
-@media (prefers-color-scheme:dark){{:root{{color-scheme:dark;--bg:#121211;--card:#1a1a19;--line:#2e2e2c;--ink:#f0efec;
---ink2:#c3c2b7;--ink3:#8d8c85;--accent:#3987e5;--up:#4cc38a;--down:#f07170;--warn:#f0b450;--warnbg:#3a2c12;--tag:#2a2a28}}}}
-*{{box-sizing:border-box}}body{{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 -apple-system,BlinkMacSystemFont,
-"Apple SD Gothic Neo","Pretendard","Noto Sans KR",sans-serif;-webkit-font-smoothing:antialiased}}
-header{{max-width:1180px;margin:0 auto;padding:20px 16px 8px}}h1{{font-size:20px;margin:0 0 12px;letter-spacing:-.01em}}
-.facts{{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px}}
-.fact{{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 12px}}
-.fact span{{display:block;font-size:12px;color:var(--ink2)}}.fact b{{font-size:17px;font-variant-numeric:tabular-nums}}
-.fact small{{display:block;font-size:12px;color:var(--ink3);font-weight:400}}
-nav{{position:sticky;top:0;z-index:2;background:color-mix(in srgb,var(--bg) 92%,transparent);backdrop-filter:blur(6px);
-border-bottom:1px solid var(--line)}}nav div{{max-width:1180px;margin:0 auto;padding:8px 16px;display:flex;gap:4px;overflow-x:auto}}
-nav a{{white-space:nowrap;color:var(--ink2);text-decoration:none;padding:4px 10px;border-radius:999px;font-size:13px}}
-nav a:hover{{background:var(--tag);color:var(--ink)}}
-main{{max-width:1180px;margin:0 auto;padding:8px 16px 48px}}
-section{{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin:14px 0;scroll-margin-top:52px}}
-h2{{font-size:16px;margin:0 0 10px}}h2 small,summary small{{font-weight:400;color:var(--ink3);font-size:12px;margin-left:8px}}
-h3{{font-size:13px;color:var(--ink2);margin:16px 0 6px}}
-.tw{{overflow-x:auto;margin:0 -4px}}table{{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}}
-th{{text-align:left;font-size:12px;font-weight:500;color:var(--ink2);padding:6px 8px;border-bottom:1px solid var(--line);white-space:nowrap}}
-td{{padding:8px;border-bottom:1px solid var(--line);vertical-align:middle;white-space:nowrap}}tr:last-child td{{border-bottom:0}}
-tbody tr:hover{{background:color-mix(in srgb,var(--tag) 55%,transparent)}}
-td small{{display:block;color:var(--ink3);font-size:12px;white-space:normal;max-width:320px}}.n{{text-align:right}}
-.up{{color:var(--up)}}.down{{color:var(--down)}}
-.tag{{display:inline-block;font-size:12px;padding:1px 8px;border-radius:999px;background:var(--tag);color:var(--ink2)}}
-.tag.warn{{background:var(--warnbg);color:var(--warn)}}.tag.good{{color:var(--up)}}.tag.bad{{color:var(--down)}}.tag.mute{{opacity:.7}}
-.empty{{color:var(--ink3);margin:6px 0}}.alert{{background:var(--warnbg);color:var(--warn);border-radius:10px;padding:10px 12px;margin:10px 0 0}}
-.spark{{display:block}}.spark-line{{fill:none;stroke:var(--accent);stroke-width:2;stroke-linejoin:round;stroke-linecap:round}}
-.spark-dot{{fill:var(--accent);stroke:var(--card);stroke-width:2}}.spark-stop{{stroke:var(--ink3);stroke-width:1;stroke-dasharray:3 3}}
-details{{border-top:1px solid var(--line)}}details:first-of-type{{border-top:0}}summary{{cursor:pointer;padding:10px 0;font-weight:600}}
-.report{{white-space:pre-wrap;word-break:break-word;color:var(--ink);background:var(--bg);border-radius:8px;padding:12px;margin-bottom:12px;
-font-size:13.5px;line-height:1.65}}
-.list{{list-style:none;margin:0;padding:0}}.list li{{padding:9px 0;border-bottom:1px solid var(--line)}}.list li:last-child{{border:0}}
-.list small{{display:block;color:var(--ink3);font-size:12px;margin-top:2px}}code{{background:var(--tag);padding:1px 5px;border-radius:4px}}
-footer{{text-align:center;color:var(--ink3);font-size:12px;padding:0 16px 32px}}
+:root{color-scheme:light;--bg:#f2f4f6;--card:#fff;--line:#eef0f3;--ink:#191f28;--ink2:#4e5968;--ink3:#8b95a1;--fill:#f2f4f6;
+--accent:#3182f6;--up:#f04452;--down:#3182f6;--upbg:#fdeef0;--downbg:#e8f3ff;--warn:#c27a00;--warnbg:#fff4e0}
+@media (prefers-color-scheme:dark){:root{color-scheme:dark;--bg:#101013;--card:#1c1c21;--line:#2a2a31;--ink:#f2f3f5;--ink2:#b0b8c1;
+--ink3:#7e8792;--fill:#2a2a31;--accent:#4c94ff;--up:#ff5c6a;--down:#4c94ff;--upbg:#3a1f24;--downbg:#1a2a44;--warn:#ffb340;--warnbg:#3a2a10}}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 "Pretendard Variable",Pretendard,-apple-system,BlinkMacSystemFont,
+"Apple SD Gothic Neo","Noto Sans KR",sans-serif;-webkit-font-smoothing:antialiased;letter-spacing:-.01em}
+.wrap{max-width:600px;margin:0 auto;padding:0 12px 48px}
+nav{position:sticky;top:0;z-index:5;background:color-mix(in srgb,var(--bg) 88%,transparent);backdrop-filter:blur(10px)}
+nav div{max-width:600px;margin:0 auto;padding:10px 12px;display:flex;gap:6px;overflow-x:auto;scrollbar-width:none}
+nav div::-webkit-scrollbar{display:none}
+nav a{white-space:nowrap;color:var(--ink2);text-decoration:none;padding:7px 13px;border-radius:999px;font-size:14px;font-weight:600;background:var(--card)}
+nav a.on{background:var(--ink);color:var(--card)}
+.card,.hero{background:var(--card);border-radius:20px;padding:22px 20px;margin:12px 0;scroll-margin-top:60px}
+.hero{padding-top:26px}.hero small{color:var(--ink3);font-size:13px}.hero>span{display:block;margin-top:14px;color:var(--ink2);font-size:15px}
+.big{display:block;font-size:34px;font-weight:700;letter-spacing:-.02em;margin:2px 0 4px;font-variant-numeric:tabular-nums}
+.hero p{margin:0;color:var(--ink2);font-size:15px;font-weight:600}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:16px}.chips span{background:var(--fill);border-radius:10px;padding:6px 10px;font-size:13px;color:var(--ink2)}
+.chips b{color:var(--ink);font-weight:700}
+h2{font-size:20px;font-weight:700;margin:0 0 10px}h2 small{color:var(--accent);font-size:15px;font-weight:600;margin-left:4px}
+h3{font-size:15px;color:var(--ink2);margin:22px 0 4px}
+.up{color:var(--up)!important}.down{color:var(--down)!important}
+.lead{color:var(--ink3);font-size:14px;margin:-4px 0 6px}
+.row{border-radius:14px;margin:0 -8px}.row[open]{background:var(--fill)}
+.row summary{list-style:none;display:flex;align-items:center;gap:12px;padding:12px 8px;cursor:pointer;border-radius:14px}
+.row summary::-webkit-details-marker,.fold summary::-webkit-details-marker{display:none}
+.row summary:hover{background:var(--fill)}
+.av{flex:0 0 42px;height:42px;border-radius:50%;background:var(--fill);display:grid;place-items:center;font-size:11.5px;font-weight:700;
+color:var(--ink2);letter-spacing:-.03em;overflow:hidden}
+.row[open] .av{background:var(--card)}
+.rt{flex:1;min-width:0;display:flex;flex-direction:column}.rt b{font-size:16px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rt small,.rr small{color:var(--ink3);font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.nm{color:var(--ink3);font-weight:400;font-size:13px;margin-left:2px}
+.rr{display:flex;flex-direction:column;align-items:flex-end;font-variant-numeric:tabular-nums}.rr b{font-size:16px;font-weight:600}
+.chev{width:8px;height:8px;border-right:2px solid var(--ink3);border-bottom:2px solid var(--ink3);transform:rotate(45deg);margin:0 4px 4px 2px;
+transition:transform .2s}details[open]>summary .chev{transform:rotate(-135deg);margin-bottom:-4px}
+.rb{padding:2px 12px 16px}
+em{font-style:normal;font-size:12px;font-weight:600;padding:2px 7px;border-radius:6px;background:var(--fill);color:var(--ink2);margin-right:4px}
+.row[open] em{background:var(--card)}em.good{background:var(--upbg);color:var(--up)}em.bad{background:var(--downbg);color:var(--down)}
+em.warn{background:var(--warnbg);color:var(--warn)}
+.kv{margin:8px 0 0;display:grid;gap:0}.kv div{display:flex;justify-content:space-between;gap:12px;padding:9px 0;border-bottom:1px solid var(--line)}
+.kv div:last-child{border:0}.kv dt{color:var(--ink2)}.kv dd{margin:0;font-weight:600;text-align:right;font-variant-numeric:tabular-nums}
+.kv small{color:var(--ink3);font-weight:400;font-size:13px}
+.row[open] .kv div{border-color:color-mix(in srgb,var(--ink3) 18%,transparent)}
+.hint,.desc{color:var(--ink2);font-size:14px;margin:12px 0 0}.desc{margin:0 0 4px}
+code{background:var(--card);padding:1px 6px;border-radius:6px;font-size:13px}
+.chart{position:relative;height:170px;margin:4px 0 6px;touch-action:pan-y}.chart svg{display:block;width:100%;height:100%;overflow:visible}
+.chart .ln{fill:none;stroke-width:2;stroke-linejoin:round;stroke-linecap:round}
+.chart .ref{stroke:var(--ink3);stroke-width:1;stroke-dasharray:4 4}.chart .reflbl{fill:var(--ink3);font-size:11px}
+.chart .cross{stroke:var(--ink3);stroke-width:1}.chart .dot{stroke:var(--card);stroke-width:2}
+.tip{position:absolute;top:-6px;transform:translateX(-50%);background:var(--ink);color:var(--card);font-size:12px;font-weight:600;
+padding:4px 8px;border-radius:8px;white-space:nowrap;pointer-events:none;font-variant-numeric:tabular-nums}
+.empty{display:flex;flex-direction:column;align-items:center;gap:6px;padding:22px 8px;color:var(--ink3);text-align:center;font-size:14px}
+.empty span{font-size:30px}
+.alert{background:var(--warnbg);color:var(--warn);border-radius:14px;padding:12px 14px;margin:10px 0;font-size:14px;font-weight:500}
+.tabs{display:flex;gap:6px;overflow-x:auto;margin:0 0 10px;scrollbar-width:none}
+.tab{border:0;background:var(--fill);color:var(--ink2);font:inherit;font-size:14px;font-weight:600;padding:7px 13px;border-radius:999px;cursor:pointer;white-space:nowrap}
+.tab.on{background:var(--ink);color:var(--card)}.pane{display:none}.pane.on{display:block}
+.when{color:var(--ink3);font-size:13px}
+.report{white-space:pre-wrap;word-break:keep-all;overflow-wrap:anywhere;font-size:15px;line-height:1.7;margin-top:6px;color:var(--ink)}
+.report b{font-weight:700}.report a{color:var(--accent)}.report .li{display:block;padding-left:14px;text-indent:-10px}
+.report .li::before{content:"·";color:var(--ink3);margin-right:6px}
+.plain{list-style:none;margin:0;padding:0}.plain li{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 0}
+.plain li>span{display:flex;align-items:center;gap:12px;min-width:0}.plain li b{font-variant-numeric:tabular-nums}
+.plain li.note{display:block;border-bottom:1px solid var(--line);padding:12px 0}.plain li.note:last-child{border:0}
+.plain li.note small{display:block;color:var(--ink3);font-size:13px;margin-top:3px}
+.fold{border-top:1px solid var(--line)}.fold:first-of-type{border:0}
+.fold summary{list-style:none;display:flex;justify-content:space-between;align-items:center;padding:14px 0;font-weight:600;cursor:pointer;font-size:16px}
+.fold summary small{color:var(--ink3);font-weight:400;font-size:13px;margin-left:6px}
+footer{text-align:center;color:var(--ink3);font-size:12px;padding:8px 16px 32px}
 </style></head><body>
-<header><h1>Stock Mining</h1><div class="facts">{facts}</div>{alerts}</header>
-<nav><div>{nav}</div></nav>
-<main>{body}</main>
-<footer>보기 전용 · 매매 기록과 승인은 슬랙에서 · 투자 판단과 주문은 직접 하세요</footer>
+<nav><div>{{nav}}</div></nav>
+<div class="wrap">{{hero}}{{body}}</div>
+<footer>보기 전용 · 기록과 승인은 슬랙에서 · 투자 판단과 주문은 직접 하세요</footer>
+<script>
+(function(){
+var NS="http://www.w3.org/2000/svg";
+function el(t,a){var e=document.createElementNS(NS,t);for(var k in a)e.setAttribute(k,a[k]);return e}
+function fmt(v){return "$"+v.toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2})}
+function draw(box){
+  if(box.dataset.done||!box.offsetWidth)return;box.dataset.done=1;
+  var D=JSON.parse(box.dataset.chart),c=D.c,W=box.offsetWidth,H=box.offsetHeight,pad=6,lab=64;
+  var vals=c.slice();if(D.stop)vals.push(D.stop);if(D.avg)vals.push(D.avg);
+  var lo=Math.min.apply(null,vals),hi=Math.max.apply(null,vals),sp=(hi-lo)||1;lo-=sp*.06;hi+=sp*.06;sp=hi-lo;
+  var X=function(i){return pad+i/(c.length-1)*(W-pad*2-lab)},Y=function(v){return pad+(hi-v)/sp*(H-pad*2)};
+  var col=getComputedStyle(document.documentElement).getPropertyValue(c[c.length-1]>=c[0]?"--up":"--down").trim();
+  var svg=el("svg",{viewBox:"0 0 "+W+" "+H,role:"img","aria-label":"최근 "+c.length+"일 종가, 마지막 "+fmt(c[c.length-1])});
+  [["stop","손절 "],["avg","평단 "]].forEach(function(r){var v=D[r[0]];if(!v)return;
+    svg.appendChild(el("line",{x1:pad,x2:W-pad-lab+4,y1:Y(v),y2:Y(v),"class":"ref"}));
+    var t=el("text",{x:W-pad-lab+8,y:Y(v)+4,"class":"reflbl"});t.textContent=r[1]+fmt(v);svg.appendChild(t)});
+  var d=c.map(function(v,i){return(i?"L":"M")+X(i).toFixed(1)+" "+Y(v).toFixed(1)}).join("");
+  svg.appendChild(el("path",{d:d,"class":"ln",stroke:col}));
+  var lx=X(c.length-1),ly=Y(c[c.length-1]);
+  var end=el("circle",{cx:lx,cy:ly,r:4,fill:col,"class":"dot"});svg.appendChild(end);
+  var cross=el("line",{y1:0,y2:H,"class":"cross",visibility:"hidden"}),dot=el("circle",{r:5,fill:col,"class":"dot",visibility:"hidden"});
+  svg.appendChild(cross);svg.appendChild(dot);box.appendChild(svg);
+  var tip=document.createElement("div");tip.className="tip";tip.style.display="none";box.appendChild(tip);
+  function show(e){var r=box.getBoundingClientRect(),x=e.clientX-r.left;
+    var i=Math.round((x-pad)/(W-pad*2-lab)*(c.length-1));i=Math.max(0,Math.min(c.length-1,i));
+    var px=X(i);cross.setAttribute("x1",px);cross.setAttribute("x2",px);dot.setAttribute("cx",px);dot.setAttribute("cy",Y(c[i]));
+    cross.setAttribute("visibility","visible");dot.setAttribute("visibility","visible");
+    var p=D.d[i].slice(5).replace("-","/");tip.textContent=p+"  "+fmt(c[i]);tip.style.display="block";
+    tip.style.left=Math.max(50,Math.min(W-50,px))+"px"}
+  function hide(){cross.setAttribute("visibility","hidden");dot.setAttribute("visibility","hidden");tip.style.display="none"}
+  box.addEventListener("pointermove",show);box.addEventListener("pointerdown",show);box.addEventListener("pointerleave",hide);
+}
+function all(){document.querySelectorAll(".chart").forEach(draw)}
+document.querySelectorAll("details").forEach(function(d){d.addEventListener("toggle",all)});
+all();
+document.querySelectorAll(".tab").forEach(function(b){b.addEventListener("click",function(){
+  document.querySelectorAll(".tab,.pane").forEach(function(x){x.classList.remove("on")});
+  b.classList.add("on");document.getElementById(b.dataset.tab).classList.add("on")})});
+var links=[].slice.call(document.querySelectorAll("nav a"));
+function spy(){var y=window.scrollY+90,cur=links[0];links.forEach(function(a){var s=document.querySelector(a.getAttribute("href"));
+  if(s&&s.offsetTop<=y)cur=a});links.forEach(function(a){a.classList.toggle("on",a===cur)})}
+window.addEventListener("scroll",spy,{passive:true});spy();
+})();
+</script>
 </body></html>"""
 
 
