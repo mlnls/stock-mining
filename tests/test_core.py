@@ -229,3 +229,13 @@ def test_markets_learn_separately(tmp_path):
     assert sorted(us.seed_strategies()) == sorted(kr.seed_strategies())  # same starting rules, separate copies
     kr.db.execute("UPDATE strategies SET status='muted' WHERE name='rsi2_reversion'")
     assert {s["name"]: s["status"] for s in us.db.strategies()}["rsi2_reversion"] == "active"
+
+
+def test_seed_refuses_empty_strategies_dir(tmp_path):
+    from stockmining.config import load_config
+    from stockmining.jobs import App
+    p = tmp_path / "c.yaml"
+    p.write_text(yaml.safe_dump({"market": "kr", "notifier": "console", "db_path": str(tmp_path / "k.db"),
+                                 "strategies_dir": str(tmp_path / "none")}))
+    with pytest.raises(FileNotFoundError):
+        App(load_config(p)).seed_strategies()

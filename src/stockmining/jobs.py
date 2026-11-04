@@ -125,7 +125,10 @@ class App:
         now = self.now().isoformat(timespec="seconds")
         existing = {s["name"]: s for s in self.db.strategies(("active", "muted", "retired"))}
         names = []
-        for f in sorted(self.cfg.path("strategies_dir").glob("*.yaml")):
+        files = sorted(self.cfg.path("strategies_dir").glob("*.yaml"))
+        if not files:  # a wrong path must never retire every strategy
+            raise FileNotFoundError(f"no strategy YAML in {self.cfg.path('strategies_dir')} (STOCKMINING_HOME?)")
+        for f in files:
             spec = yaml.safe_load(f.read_text(encoding="utf-8"))
             R.validate(spec)
             cur = existing.get(spec["name"])
