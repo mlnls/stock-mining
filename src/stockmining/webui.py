@@ -292,7 +292,7 @@ em.warn{background:var(--warnbg);color:var(--warn)}
 .kv{margin:6px 0 0;display:grid}.kv div{display:flex;justify-content:space-between;gap:12px;padding:10px 0;border-bottom:1px solid var(--line)}
 .kv div:last-child{border:0}.kv dt{color:var(--ink2)}.kv dd{margin:0;font-weight:600;text-align:right;font-variant-numeric:tabular-nums}
 .kv small{color:var(--ink3);font-weight:400;font-size:13px}.fold-row[open] .kv div{border-color:color-mix(in srgb,var(--ink3) 18%,transparent)}
-.hint,.desc{color:var(--ink2);font-size:14.5px;margin:12px 0 0;line-height:1.6}.hero p.desc,.desc{margin:6px 0 0;font-weight:400}
+.hint,.desc{color:var(--ink2);font-size:14.5px;margin:12px 0 0;line-height:1.6}.hero p.desc,.desc{margin:6px 0 0;font-weight:400}.hero p.lead{font-weight:400}
 code{background:var(--fill);padding:1px 6px;border-radius:6px;font-size:13px;white-space:nowrap}
 .state{font-size:13px;color:var(--ink3);font-weight:500}.state.on{color:var(--up)}
 .quote{display:flex;flex-direction:column;gap:2px}.quote .big{margin:0}.quote .chg{font-size:16px;font-weight:600}
