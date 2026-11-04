@@ -161,7 +161,7 @@ function pc(v,d){return (v>0?"+":"")+v.toFixed(d==null?1:d)+"%"}
 function tn(e,v){e.classList.remove("up","down");if(v>0)e.classList.add("up");else if(v<0)e.classList.add("down")}
 function dt(s){return s.slice(2).replace(/-/g,".")}
 function el(t,a){var e=document.createElementNS(NS,t);for(var k in a)e.setAttribute(k,a[k]);return e}
-fetch("/api/sim",{credentials:"same-origin"}).then(function(r){return r.json()}).then(init).catch(function(){
+fetch(location.pathname.indexOf("/kr/")===0?"/api/sim?m=kr":"/api/sim",{credentials:"same-origin"}).then(function(r){return r.json()}).then(init).catch(function(){
   $("simdate").textContent="불러오지 못했어요"});
 function init(d){R=d;R.by={};R.methods.forEach(function(m,i){R.by[m.id]=m;m.rank0=i});
   CH=CH.filter(function(id){return R.by[id]});CH.forEach(function(id,i){R.by[id].ci=i});

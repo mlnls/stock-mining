@@ -148,7 +148,25 @@ class Slack:
                 log.error("slack send failed: %s", e)
 
 
+class Prefixed:
+    """Wraps a sender so every message starts with ``prefix`` (tells two market instances apart)."""
+
+    def __init__(self, inner, prefix: str):
+        self.inner, self.prefix = inner, prefix
+
+    def __getattr__(self, name):
+        return getattr(self.inner, name)
+
+    def send(self, text: str, *a, **kw) -> None:
+        self.inner.send(self.prefix + text, *a, **kw)
+
+
 def make(cfg: dict, db=None):
+    s = _make(cfg, db)
+    return Prefixed(s, cfg["notify_prefix"]) if cfg.get("notify_prefix") else s
+
+
+def _make(cfg: dict, db=None):
     kind = cfg.get("notifier", "slack")
     if kind == "slack":
         e = os.environ.get

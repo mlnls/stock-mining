@@ -221,12 +221,20 @@ TABS = [("/", "홈", "M3 11.5 12 4l9 7.5V20a1 1 0 0 1-1 1h-5v-6h-6v6H4a1 1 0 0 1
         ("/reports", "리포트", "M6 3h9l4 4v14H6zM9 12h7M9 16h7M9 8h3")]
 
 
-def page(title: str, body: str, tab: str, back: str | None = None, quote_codes: list[str] | None = None) -> str:
+def page(title: str, body: str, tab: str, back: str | None = None, quote_codes: list[str] | None = None,
+         base: str = "", switch: str | None = None) -> str:
+    """``base`` = "/kr" on Korean-market pages; ``switch`` = the same page in the other market (shows a toggle)."""
     nav = "".join(
-        f'<a href="{u}" class="{"on" if u == tab else ""}"><svg viewBox="0 0 24 24"><path d="{d}"/></svg>{t}</a>'
+        f'<a href="{base + u if u != "/" else (base or "/")}" class="{"on" if u == tab else ""}">'
+        f'<svg viewBox="0 0 24 24"><path d="{d}"/></svg>{t}</a>'
         for u, t, d in TABS)
+    tog = ""
+    if switch is not None:
+        us, kr = (switch, "#") if base else ("#", switch)
+        tog = (f'<div class="mkt-tog"><a href="{h(us)}" class="{"" if base else "on"}">🇺🇸 미국</a>'
+               f'<a href="{h(kr)}" class="{"on" if base else ""}">🇰🇷 국내</a></div>')
     top = (f'<header class="top">{f"<a class=back href={h(back)} aria-label=뒤로></a>" if back else ""}'
-           f'<h1>{h(title)}</h1></header>')
+           f'<h1>{h(title)}</h1>{tog}</header>')
     codes = ",".join(dict.fromkeys(quote_codes or []))
     return (SHELL.replace("{{title}}", h(title)).replace("{{top}}", top).replace("{{body}}", body)
             .replace("{{nav}}", nav).replace("{{codes}}", h(codes)))
@@ -250,6 +258,9 @@ a{color:inherit;text-decoration:none}
 .top{position:sticky;top:0;z-index:5;background:color-mix(in srgb,var(--bg) 88%,transparent);backdrop-filter:blur(10px);
 display:flex;align-items:center;gap:6px;max-width:600px;margin:0 auto;padding:12px 16px 8px}
 .top h1{font-size:22px;font-weight:700;margin:0;letter-spacing:-.02em}
+.mkt-tog{margin-left:auto;display:flex;background:var(--fill);border-radius:999px;padding:3px}
+.mkt-tog a{padding:5px 10px;border-radius:999px;font-size:13px;font-weight:600;color:var(--ink3);white-space:nowrap}
+.mkt-tog a.on{background:var(--card);color:var(--ink)}
 .back{width:32px;height:32px;display:grid;place-items:center;margin-left:-8px}
 .back::before{content:"";width:11px;height:11px;border-left:2.5px solid var(--ink);border-bottom:2.5px solid var(--ink);transform:rotate(45deg);margin-left:4px}
 nav.tabs{position:fixed;left:0;right:0;bottom:0;z-index:6;background:var(--card);border-top:1px solid var(--line);

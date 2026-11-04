@@ -13,6 +13,7 @@ TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 git archive --format=tar.gz -o "$TMP/sm.tgz" HEAD
 scp -q -i "$KEY" "$TMP/sm.tgz" "$USER_@$HOST:/tmp/sm.tgz"
 [ -f config.yaml ] && scp -q -i "$KEY" config.yaml "$USER_@$HOST:/tmp/sm-config.yaml"
+[ -f config.kr.yaml ] && scp -q -i "$KEY" config.kr.yaml "$USER_@$HOST:/tmp/sm-config-kr.yaml"
 
 # secrets: SSM (local) → stdin → host, never written to local disk. If SSM can't be read (expired
 # login), keep the env file already on the host.
@@ -29,4 +30,4 @@ fi
 "${SSH[@]}" "WEB_DOMAIN='${WEB_DOMAIN:-}'; "'set -e
   sudo rm -rf /tmp/sm && mkdir -p /tmp/sm && tar xzf /tmp/sm.tgz -C /tmp/sm
   sudo LOCAL=1 WEB_DOMAIN='"${WEB_DOMAIN:-}"' bash /tmp/sm/deploy/install.sh
-  rm -f /tmp/sm.tgz /tmp/sm-secrets /tmp/sm-config.yaml'
+  rm -f /tmp/sm.tgz /tmp/sm-secrets /tmp/sm-config.yaml /tmp/sm-config-kr.yaml'

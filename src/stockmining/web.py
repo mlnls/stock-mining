@@ -46,8 +46,11 @@ class NotFound(Exception):
 
 
 class Ctx:
-    def __init__(self, cfg: Config, db: DB):
+    def __init__(self, cfg: Config, db: DB, hdb: DB | None = None, markets: list | None = None):
+        """``hdb``: DB holding 내 자산 (the main instance); ``markets``: every (cfg, db) whose swing positions count."""
         self.cfg, self.db = cfg, db
+        self.hdb = hdb or db
+        self.markets = markets or [(cfg, db)]
         self.cur = "USD" if cfg.is_us else "KRW"
         self.info = db.ticker_info()
         self._ctx = None
@@ -66,19 +69,24 @@ class Ctx:
             return Q.history_kr(code, n)
         rows = self.db.query("SELECT date, close FROM prices WHERE code=? AND close IS NOT NULL ORDER BY date DESC LIMIT ?",
                              (code, n))
+        if not rows and Q.is_kr(code):  # e.g. a KR ETF in 내 자산 (ETFs are not in the stock universe)
+            return Q.history_kr(code, n)
         return [(r["date"], r["close"]) for r in reversed(rows)]
 
     def holdings(self) -> list[dict]:
         """Long-term holdings (holdings table) + open swing positions (journal), each with currency."""
         try:
-            rows = self.db.query("SELECT * FROM holdings ORDER BY market, code")
+            rows = self.hdb.query("SELECT * FROM holdings ORDER BY market, code")
         except sqlite3.OperationalError:  # table not created yet
             rows = []
         out = [dict(r, cur="KRW" if r["market"] == "kr" else "USD", kind="long") for r in rows]
-        pos, _ = J.positions_and_roundtrips(self.db)
-        for c, p in pos.items():
-            out.append({"code": c, "market": "us" if self.cfg.is_us else "kr", "name": self.name(c), "qty": p["qty"],
-                        "avg_price": p["avg_price"], "cur": self.cur, "kind": "swing", "pos": p})
+        for cfg, db in self.markets:
+            pos, _ = J.positions_and_roundtrips(db)
+            info = db.ticker_info() if db is not self.db else self.info
+            for c, p in pos.items():
+                out.append({"code": c, "market": "us" if cfg.is_us else "kr", "name": info.get(c, {}).get("name") or c,
+                            "qty": p["qty"], "avg_price": p["avg_price"], "cur": "USD" if cfg.is_us else "KRW",
+                            "kind": "swing", "pos": p})
         return out
 
     def recs(self) -> tuple[str | None, list[dict]]:
@@ -122,7 +130,8 @@ def _totals(hold: list[dict], qs: dict, fx: float) -> tuple[float, float, float,
 def home(c: Ctx) -> tuple[str, str, list[str]]:
     hold = c.holdings()
     rdate, recs = c.recs()
-    codes = [x["code"] for x in hold] + [r["code"] for r in recs] + list(Q.INDICES)
+    idxs = Q.INDICES if c.cfg.is_us else Q.INDICES_KR
+    codes = [x["code"] for x in hold] + [r["code"] for r in recs] + list(idxs)
     qs = Q.get(codes)
     fx = (qs.get("KRW=X") or {}).get("price") or 1350.0
     body = []
@@ -139,7 +148,7 @@ def home(c: Ctx) -> tuple[str, str, list[str]]:
                     '<p>슬랙에서 <code>hold 코드 수량 평단</code> 으로 등록하세요</p></section>')
 
     mk = ""
-    for code, label in Q.INDICES.items():
+    for code, label in idxs.items():
         q = qs.get(code) or {}
         price = "-" if q.get("price") is None else (f'{q["price"]:,.1f}원' if code == "KRW=X" else f'{q["price"]:,.2f}')
         mk += (f'<a><span>{label}</span><b>{price}</b>'
@@ -437,13 +446,23 @@ def report(c: Ctx, rid: str) -> tuple[str, str, list[str]]:
     return label, card(f"{icon} {label}", f'<p class="lead">{h(kst(r[0]["ts"]))} 작성</p>' + doc_html(data["doc"], data.get("learned"))), []
 
 
-def route(cfg: Config, db: DB, path: str, query: dict) -> str:
-    c = Ctx(cfg, db)
+def route(cfg: Config, db: DB, path: str, query: dict, kr: tuple | None = None) -> str:
+    """``kr`` = (Config, DB) of the Korean-market instance; its pages live under /kr/..."""
     parts = [unquote(p) for p in path.strip("/").split("/") if p]
+    base, markets = "", [(cfg, db)] + ([kr] if kr else [])
+    if parts[:1] == ["kr"]:
+        parts, base = parts[1:], "/kr"
+        if not kr:
+            body = card("🇰🇷 국내 스윙 모드", empty("⏳", "국내 시장 데이터를 준비하고 있어요. 첫 수집은 30분~1시간쯤 걸려요."))
+            return page("국내", body, "/", None, [], base, "/")
+        c = Ctx(kr[0], kr[1], hdb=db, markets=markets)
+    else:
+        c = Ctx(cfg, db, markets=markets)
     tab, back = "/", None
     if not parts:
         title, body, codes = home(c)
     elif parts == ["assets"]:
+        c = Ctx(cfg, db, markets=markets)
         (title, body, codes), tab = assets(c), "/assets"
     elif parts == ["picks"]:
         (title, body, codes), tab = picks(c), "/picks"
@@ -452,21 +471,34 @@ def route(cfg: Config, db: DB, path: str, query: dict) -> str:
     elif len(parts) == 2 and parts[0] == "strategy":
         (title, body, codes), tab, back = strategy(c, parts[1]), "/strategies", "/strategies"
     elif len(parts) == 2 and parts[0] == "stock":
+        if base and not Q.is_kr(parts[1]):  # US ticker reached from a KR page (e.g. 내 자산)
+            c = Ctx(cfg, db, markets=markets)
         (title, body, codes), tab, back = stock(c, parts[1]), "", "javascript:history.back()"
+    elif parts == ["sim"]:
+        title, body, codes, tab = ("타임머신 모의투자" + (" · 국내" if base else ""), WS.page_body(WS.load(c.db)), [], "/sim")
     elif parts == ["reports"]:
         (title, body, codes), tab = reports(c, (query.get("t") or ["list"])[0]), "/reports"
-    elif parts == ["sim"]:
-        title, body, codes, tab = "타임머신 모의투자", WS.page_body(WS.load(db)), [], "/sim"
     elif len(parts) == 2 and parts[0] == "report":
         (title, body, codes), tab, back = report(c, parts[1]), "/reports", "/reports"
     else:
         raise NotFound
-    return page(title, body, tab, back, codes)
+    if base:  # keep in-page links inside /kr (내 자산 and the API are shared)
+        body = re.sub(r'href="/(?!kr/|api/)', 'href="/kr/', body)
+        if back and back.startswith("/"):
+            back = "/kr" + back
+    switch = None
+    if kr and tab in ("/", "/assets", "/picks", "/strategies", "/sim", "/reports"):
+        rest = "/" + "/".join(parts) if parts else "/"
+        if parts[:1] in (["strategy"], ["report"], ["stock"]):
+            rest = tab
+        switch = rest if base else ("/kr" + rest).rstrip("/") or "/kr"
+    return page(title, body, tab, back, codes, base, switch)
 
 
 # ---------------------------------------------------------------------------- server
 class Handler(BaseHTTPRequestHandler):
     cfg: Config
+    kr_cfg: Config | None = None
     user = "me"
     password: str | None = None
 
@@ -492,7 +524,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         query = parse_qs(url.query)
         if url.path == "/api/sim":
-            db = ReadOnlyDB(self.cfg.path("db_path"))
+            kr = (query.get("m") or [""])[0] == "kr" and self.kr_cfg is not None and self.kr_cfg.path("db_path").exists()
+            db = ReadOnlyDB((self.kr_cfg if kr else self.cfg).path("db_path"))
             try:
                 return self._send(200, db.get("replay") or "null", "application/json")
             finally:
@@ -502,10 +535,19 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps(Q.get(codes)), "application/json")
         try:
             db = ReadOnlyDB(self.cfg.path("db_path"))
+            kdb = None
             try:
-                html = route(self.cfg, db, url.path, query)
+                if self.kr_cfg is not None and self.kr_cfg.path("db_path").exists():
+                    try:
+                        kdb = ReadOnlyDB(self.kr_cfg.path("db_path"))
+                        kdb.query("SELECT 1 FROM strategies LIMIT 1")
+                    except sqlite3.Error:
+                        kdb = None
+                html = route(self.cfg, db, url.path, query, (self.kr_cfg, kdb) if kdb else None)
             finally:
                 db.conn.close()
+                if kdb:
+                    kdb.conn.close()
             self._send(200, html, "text/html; charset=utf-8")
         except NotFound:
             self._send(404, page("없는 페이지", card("없는 페이지", empty("🤔", "찾는 페이지가 없어요.")), "", "/"),
@@ -530,5 +572,10 @@ def serve(cfg: Config, host: str, port: int) -> None:
     if not pw and host not in ("127.0.0.1", "localhost"):
         raise SystemExit("WEB_PASSWORD 가 없으면 localhost 에서만 띄울 수 있어요")
     Handler.cfg, Handler.password, Handler.user = cfg, pw, os.environ.get("WEB_USER", "me")
+    kp = os.environ.get("STOCKMINING_CONFIG_KR")
+    if kp and Path(kp).exists():
+        from .config import load_config
+        Handler.kr_cfg = load_config(kp)
+        log.info("korean market pages enabled (%s)", kp)
     log.info("dashboard on http://%s:%s", host, port)
     ThreadingHTTPServer((host, port), Handler).serve_forever()

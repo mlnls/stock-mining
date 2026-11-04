@@ -97,6 +97,8 @@ def refresh_listing(db: DB, cfg: dict) -> list[str]:
     pats = cfg["universe"]["exclude_name_patterns"]
     snap = _fdr().StockListing("KRX")
     snap = snap[[is_common_stock(c, n, pats) for c, n in zip(snap["Code"], snap["Name"])]]
+    if cfg["universe"].get("pool_size") and "Marcap" in snap.columns:
+        snap = snap.sort_values("Marcap", ascending=False).head(int(cfg["universe"]["pool_size"]))
     now = datetime.now().isoformat(timespec="seconds")
     db.executemany(
         """INSERT INTO tickers(code,name,market,marcap,in_universe,updated) VALUES(?,?,?,?,0,?)

@@ -42,13 +42,19 @@ elif [ -z "$LOCAL" ] && $AWS s3 cp "s3://$BUCKET/config/config.yaml" "$ETC/confi
 elif [ ! -f "$ETC/config.yaml" ]; then
   cp "$APP/config.example.yaml" "$ETC/config.yaml"
 fi
-"$APP/.venv/bin/python" - "$ETC/config.yaml" <<'PY'
+# 2b) Korean-market instance (국내 스윙 모드): own config + DB, same messenger
+if [ -n "$LOCAL" ] && [ -f /tmp/sm-config-kr.yaml ]; then
+  cp /tmp/sm-config-kr.yaml "$ETC/config-kr.yaml"; echo "KR config uploaded"
+elif [ ! -f "$ETC/config-kr.yaml" ]; then
+  cp "$APP/deploy/config-kr.yaml" "$ETC/config-kr.yaml"
+fi
+"$APP/.venv/bin/python" - "$ETC/config.yaml" "$ETC/config-kr.yaml" <<'PY'
 import sys, yaml
-p = sys.argv[1]
-c = yaml.safe_load(open(p, encoding="utf-8")) or {}
-c["db_path"] = "/var/lib/stockmining/stockmining.db"
-c["principles_path"] = "/var/lib/stockmining/principles.md"
-yaml.safe_dump(c, open(p, "w", encoding="utf-8"), allow_unicode=True, sort_keys=False)
+for p, sfx in ((sys.argv[1], ""), (sys.argv[2], "_kr")):
+    c = yaml.safe_load(open(p, encoding="utf-8")) or {}
+    c["db_path"] = f"/var/lib/stockmining/stockmining{sfx}.db"
+    c["principles_path"] = f"/var/lib/stockmining/principles{sfx}.md"
+    yaml.safe_dump(c, open(p, "w", encoding="utf-8"), allow_unicode=True, sort_keys=False)
 PY
 
 # 3) secrets from SSM Parameter Store (/stockmining/ANTHROPIC_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)
@@ -57,6 +63,8 @@ if [ -n "$LOCAL" ]; then
     { echo "STOCKMINING_HOME=/opt/stockmining"; echo "STOCKMINING_CONFIG=/etc/stockmining/config.yaml"
       cat /tmp/sm-secrets; } > "$ETC/env"
   fi
+  touch "$ETC/env"
+  grep -q '^STOCKMINING_CONFIG_KR=' "$ETC/env" || echo "STOCKMINING_CONFIG_KR=/etc/stockmining/config-kr.yaml" >> "$ETC/env"
 else
   install -m 0755 "$APP/deploy/fetch-secrets.sh" /usr/local/bin/stockmining-fetch-secrets
   /usr/local/bin/stockmining-fetch-secrets
@@ -74,13 +82,14 @@ chmod 0640 "$ETC"/*; chgrp stockmining "$ETC"/*
 install -m 0755 "$APP/deploy/backup.sh" /usr/local/bin/stockmining-backup
 cp "$APP"/deploy/systemd/*.service "$APP"/deploy/systemd/*.timer /etc/systemd/system/
 if [ -n "$LOCAL" ]; then  # shared host: cap jobs so the other services keep running
-  for u in stockmining@ stockmining-bot stockmining-web; do
+  for u in stockmining@ stockmining-kr@ stockmining-bot stockmining-web; do
     mkdir -p "/etc/systemd/system/$u.service.d"
     cp "$APP/deploy/systemd/lightsail/limits.conf" "/etc/systemd/system/$u.service.d/limits.conf"
   done
 fi
 systemctl daemon-reload
-systemctl enable --now stockmining-morning.timer stockmining-evening.timer stockmining-weekly.timer
+systemctl enable --now stockmining-morning.timer stockmining-evening.timer stockmining-weekly.timer \
+  stockmining-kr-morning.timer stockmining-kr-evening.timer stockmining-kr-weekly.timer
 systemctl enable stockmining-bot.service
 systemctl restart stockmining-bot.service
 
@@ -117,5 +126,12 @@ if [ ! -s "$DATA/stockmining.db" ] || ! sqlite3 "$DATA/stockmining.db" "select 1
 else
   # pick up new/changed built-in strategies
   systemctl start --no-block stockmining@backtest.service
+fi
+# KR instance: first run backfills ~1000 KRX stocks (waits for the US job via the shared lock)
+if [ ! -s "$DATA/stockmining_kr.db" ] || ! sqlite3 "$DATA/stockmining_kr.db" "select 1 from prices limit 1" 2>/dev/null | grep -q 1; then
+  systemctl start --no-block stockmining-kr@init.service
+  echo "KR initial backfill queued: journalctl -u stockmining-kr@init -f"
+else
+  systemctl start --no-block stockmining-kr@backtest.service
 fi
 echo "install done"

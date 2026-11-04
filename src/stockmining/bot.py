@@ -31,7 +31,23 @@ HELP = """명령어 (코드 = 티커, 예: NVDA). Slack에서는 봇 DM에 '/' �
 /ask 질문                   Claude에게 질문 (웹 검색 포함)
 /hold                       내 자산(장기 보유) 목록
 /hold 코드 수량 평단         내 자산 등록·수정 (예: hold 379800 19 23965)
-/hold rm 코드               내 자산 삭제"""
+/hold rm 코드               내 자산 삭제
+
+국내 시장(스윙 모드)은 앞에 kr 을 붙여요: kr recs · kr pos · kr buy 005930 71000 3 · kr strats"""
+
+_KR = None
+
+
+def kr_app() -> App | None:
+    """Second instance for the Korean market, if configured (STOCKMINING_CONFIG_KR)."""
+    global _KR
+    import os
+    from pathlib import Path
+    p = os.environ.get("STOCKMINING_CONFIG_KR")
+    if _KR is None and p and Path(p).exists():
+        from .config import load_config
+        _KR = App(load_config(p))
+    return _KR
 
 
 def _code(s: str, app: App) -> str | None:
@@ -52,6 +68,13 @@ def handle(app: App, text: str) -> str:
     if not parts:
         return HELP
     cmd, args = parts[0].split("@")[0].lower(), parts[1:]
+    if cmd in ("/kr", "/국내"):
+        if args and args[0].lstrip("/").lower() == "hold":  # 내 자산 lives in the main instance
+            return handle(app, " ".join(args))
+        kr = kr_app()
+        if not kr:
+            return "국내 시장 모드가 설정돼 있지 않아요"
+        return handle(kr, " ".join(args) or "help")
     try:
         if cmd in ("/start", "/help"):
             return HELP

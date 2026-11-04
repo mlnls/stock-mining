@@ -22,6 +22,7 @@ _cache: dict[str, tuple[float, dict | None]] = {}
 _lock = threading.Lock()
 NAVER = "https://polling.finance.naver.com/api/realtime/domestic/stock/{codes}"
 INDICES = {"^GSPC": "S&P500", "^IXIC": "나스닥", "KRW=X": "원/달러"}
+INDICES_KR = {"^KS11": "코스피", "^KQ11": "코스닥", "KRW=X": "원/달러"}
 
 
 def is_kr(code: str) -> bool:
@@ -67,7 +68,7 @@ def _yahoo_one(code: str) -> dict | None:
         fi = yf.Ticker(code).fast_info
         price, prev = float(fi.last_price), float(fi.previous_close)
         return {"price": price, "prev": prev, "change": price - prev, "change_pct": (price / prev - 1) * 100 if prev else None,
-                "name": INDICES.get(code), "currency": fi.currency, "open": us_market_open(),
+                "name": INDICES.get(code) or INDICES_KR.get(code), "currency": fi.currency, "open": us_market_open(),
                 "time": datetime.now(ZoneInfo("Asia/Seoul")).isoformat(timespec="seconds")}
     except Exception as e:
         log.warning("yahoo quote failed for %s: %s", code, e)

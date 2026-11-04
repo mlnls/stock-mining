@@ -188,3 +188,24 @@ def test_replay_mark_to_market_values_open_positions_daily():
     assert eq[0] == 1.0 and abs(eq[2] - 1.05) < 1e-9 and abs(eq[3] - 1.10) < 1e-9
     assert abs(eq[4] - 0.95) < 1e-9 and abs(eq[5] - 0.95) < 1e-9
     assert [e[1] for e in ev] == ["b", "s"] and len(taken) == 1
+
+
+def test_web_routes_both_markets(tmp_path, monkeypatch):
+    import yaml
+    from stockmining import quotes as Q
+    from stockmining import web
+    from stockmining.config import load_config
+    from stockmining.db import DB
+    monkeypatch.setattr(Q, "get", lambda codes: {})
+    cfgs = {}
+    for m in ("us", "kr"):
+        p = tmp_path / f"{m}.yaml"
+        p.write_text(yaml.safe_dump({"market": m, "db_path": str(tmp_path / f"{m}.db"), "notifier": "console"}))
+        cfgs[m] = load_config(p)
+    us, kr = DB(cfgs["us"].path("db_path")), DB(cfgs["kr"].path("db_path"))
+    for path in ("/", "/assets", "/picks", "/strategies", "/sim", "/reports"):
+        html = web.route(cfgs["us"], us, path, {}, (cfgs["kr"], kr))
+        assert "🇰🇷 국내" in html or path == "/assets"
+        khtml = web.route(cfgs["us"], us, "/kr" + path, {}, (cfgs["kr"], kr))
+        assert khtml.count('href="/picks"') <= 1 and 'href="/kr/picks"' in khtml  # only the 🇺🇸 toggle leaves /kr
+    assert "준비" in web.route(cfgs["us"], us, "/kr", {}, None)

@@ -227,3 +227,13 @@ strategies/*.yaml   내장 전략 (출처 포함)
 principles.md       초기 원칙 (미국 스윙용. 운영 중에는 data/principles.md 가 갱신됨)
 deploy/             Terraform, systemd, 배포 스크립트
 ```
+
+## 국내 스윙 모드 (두 번째 인스턴스)
+
+미국 인스턴스와 별개로 국내 시장(KRX 시가총액 상위 1,000종목)을 같은 방식으로 돌립니다.
+
+- 설정: `deploy/config-kr.yaml` (덮어쓰려면 저장소 루트에 `config.kr.yaml`) → 서버 `/etc/stockmining/config-kr.yaml`, DB `stockmining_kr.db`
+- 작업: `stockmining-kr@{init,evening,morning,weekly,backtest}` · 타이머 평일 16:40(장 마감 후) / 08:10(개장 전), 토 15:00
+- 두 시장의 무거운 작업은 `flock /var/lib/stockmining/.jobs.lock` 으로 한 번에 하나씩만 돌아요(작은 공유 서버)
+- 슬랙: 알림 앞에 `🇰🇷 [국내]`, 명령은 앞에 `kr` (예: `kr recs`, `kr buy 005930 71000 3`). `hold`(내 자산)는 공용
+- 대시보드: 위쪽 🇺🇸/🇰🇷 전환, 국내 페이지는 `/kr/...` (내 자산은 공용)

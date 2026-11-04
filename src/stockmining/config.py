@@ -55,6 +55,7 @@ DEFAULTS: dict[str, Any] = {
         "web_search_max_uses": 8,
     },
     "notifier": "slack",            # slack | telegram | console (secrets come from env, see notify.py)
+    "notify_prefix": "",            # prepended to every message (e.g. "🇰🇷 " for a second, KR instance)
 }
 
 MARKET_DEFAULTS: dict[str, dict[str, Any]] = {
@@ -88,6 +89,7 @@ MARKET_DEFAULTS: dict[str, dict[str, Any]] = {
         "info_indices": ["KS11", "KQ11"],
         "account": {"capital": 10_000_000},
         "universe": {
+            "pool_size": 1000,            # top-N common stocks by market cap (≈ ≥1000억; keeps memory in check)
             "min_price": 0,
             "min_marcap": 100_000_000_000,
             "min_avg_value_20": 3_000_000_000,

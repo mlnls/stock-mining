@@ -1,0 +1,10 @@
+[Unit]
+Description=stockmining KR morning (국내 개장 전 브리핑)
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 08:10:00 Asia/Seoul
+Persistent=true
+Unit=stockmining-kr@morning.service
+
+[Install]
+WantedBy=timers.target
