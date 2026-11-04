@@ -126,7 +126,9 @@ def render(cfg: Config, db: DB) -> str:
         rec_rows.append([
             f'<b>{h(r["code"])}</b><small>{h(name(r["code"]))}</small>', h(LB.strat(r["strategy"])),
             sparkline(closes.get(r["code"], []), r["stop"]),
-            money(r["entry_ref"], us), money(r["stop"], us), money(r["target"], us), h(r["shares"]),
+            money(r["entry_ref"], us), money(r["stop"], us), money(r["target"], us),
+            (f'{round(r["shares"], 2):g}주<small>≈ {money(r["shares"] * r["entry_ref"], us)}</small>'
+             if r["shares"] and r["entry_ref"] else h(r["shares"])),
             money(risk, us),
             f'<span class="tag warn">⛔ 보류</span> {h(r["flagged"])}' if r["flagged"] else '<span class="tag">후보</span>'])
     recs_html = table(["종목", "고른 이유", "최근 60일", "살 가격", "손절가", "목표가", "수량", "틀리면 최대 손실", "상태"], rec_rows,
