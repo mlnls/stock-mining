@@ -145,6 +145,10 @@ class DB:
                 if self.conn.execute("PRAGMA journal_mode").fetchone()[0].lower() != "wal":
                     self.conn.execute("PRAGMA journal_mode=WAL")
                 self.conn.executescript(SCHEMA)
+                cols = {r[1] for r in self.conn.execute("PRAGMA table_info(reports)")}
+                if "data" not in cols:  # structured report (docfmt) next to the plain text
+                    self.conn.execute("ALTER TABLE reports ADD COLUMN data TEXT")
+                    self.conn.commit()
                 break
             except sqlite3.OperationalError as e:
                 if "locked" not in str(e) or attempt == 29:
@@ -266,5 +270,6 @@ class DB:
              json.dumps(backtest) if backtest else None),
         )
 
-    def add_report(self, kind: str, body: str, ts: str) -> None:
-        self.execute("INSERT INTO reports(ts,kind,body) VALUES(?,?,?)", (ts, kind, body))
+    def add_report(self, kind: str, body: str, ts: str, data: dict | None = None) -> None:
+        self.execute("INSERT INTO reports(ts,kind,body,data) VALUES(?,?,?,?)",
+                     (ts, kind, body, json.dumps(data, ensure_ascii=False) if data else None))

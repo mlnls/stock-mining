@@ -141,3 +141,15 @@ def test_bot_accepts_commands_without_slash(tmp_path):
     assert "기록: buy NVDA" in bot.handle(app, "buy nvda 180.5 0.5 test")   # Slack DM style, fractional qty
     assert "NVDA" in bot.handle(app, "/pos")                                # Telegram style
     assert "명령어" in bot.handle(app, "help")
+
+
+def test_docfmt_parse_and_slack():
+    from stockmining import docfmt as DF
+    d = DF.parse_text("📊 저녁 리포트 (11/03 마감)\n\n■ 시장 국면\n- 보통이에요 [CNBC](https://cnbc.com/x)\n"
+                      "**오늘 일정**\n- 선거일\n")
+    assert [s["title"] for s in d["sections"]] == ["시장 국면", "오늘 일정"]
+    assert d["sections"][0]["icon"] == "🌡️" and d["sections"][0]["items"] == ["보통이에요 CNBC"]
+    assert d["sources"] == [{"title": "CNBC", "url": "https://cnbc.com/x"}]
+    txt = DF.to_slack({"headline": "결론", "picks": [{"code": "REPL", "decision": "hold", "reason": "실적"}],
+                       "sections": [], "sources": []})
+    assert txt.startswith("*결론*") and "⛔ *REPL* 보류" in txt

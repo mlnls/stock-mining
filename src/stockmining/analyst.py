@@ -16,6 +16,7 @@ from pathlib import Path
 
 import anthropic
 
+from . import docfmt as DF
 from . import labels as LB
 from . import features as F
 from . import rules as R
@@ -188,7 +189,7 @@ _LEARNING_PROPS = {
 EVENING_SCHEMA = {
     "type": "object",
     "properties": {
-        "report": {"type": "string"},
+        "comment": DF.DOC_SCHEMA,
         "proposals": {
             "type": "array",
             "items": {
@@ -206,7 +207,7 @@ EVENING_SCHEMA = {
         },
         **_LEARNING_PROPS,
     },
-    "required": ["report", "proposals", "new_insights", "insight_updates"],
+    "required": ["comment", "proposals", "new_insights", "insight_updates"],
     "additionalProperties": False,
 }
 
@@ -219,12 +220,14 @@ def evening_report(cfg, principles: str, ctx: dict) -> dict:
 </data>
 
 다음을 작성하세요.
-1. report: 짧은 코멘트(400자 이내, "• " 글머리표 2~4줄).
-   후보 종목의 가격·손절가·수량·금액은 시스템이 카드로 따로 보여 주므로 숫자를 반복하지 마세요. 대신:
-   • 후보마다 왜 골랐는지와 조심할 점을 한 줄씩 (없으면 "오늘은 쉬는 날" 한 줄)
-   • 시장 분위기 한 줄 (예: "최근 한 달 나스닥이 8% 빠져 흔들리는 중")
-   • 내 매매 습관 지적은 위반(discipline)이 있을 때만 — 예: "최근 10번 중 4번 손절을 늦게 했어요"
-   • 보유 종목 경고(alerts)가 있으면 무엇을 해야 하는지 한 줄
+1. comment: 저녁 코멘트. 후보의 가격·손절가·수량·금액은 시스템이 카드로 따로 보여 주므로 숫자를 반복하지 마세요.
+   - headline: 내일에 대한 결론 한 문장
+   - picks: 내일 매수 후보(recommendations)마다 decision=go, reason=왜 골랐는지 + 조심할 점 한 문장
+   - sections(2~3개):
+     🌡️ 시장 분위기 — 최근 한 달 흐름과 변동성을 쉬운 말로 1~2줄
+     ⚠️ 조심할 점 — 보유 종목 경고(alerts), 실적 발표, 내 매매 습관 위반(discipline)이 있을 때만
+     🧠 시스템 소식 — 전략이 쉬게 되거나 다시 켜졌는지 등 바뀐 게 있을 때만 1줄
+   - sources: 빈 배열
 2. proposals: 데이터가 뒷받침할 때만 0~2개. 근거가 약하면 빈 배열.
    - kind=principle: principle_text에 원칙.md에 추가할 한두 문장, rule_spec_json은 빈 문자열.
    - kind=rule: rule_spec_json에 아래 형식의 새 규칙 JSON 문자열(백테스트로 검증됨), principle_text는 빈 문자열.
@@ -232,6 +235,8 @@ def evening_report(cfg, principles: str, ctx: dict) -> dict:
    '어떤 조건에서 돈이 벌리고/잃는가'에 대한 구체적이고 검증 가능한 문장으로. 이미 open_insights에 있는 내용은 반복하지 마세요.
    예) hypothesis: "VIX 20 이상일 때 qullamaggie_breakout 페이퍼 매매 손실이 몰린다 → 국면 필터 후보"
 4. insight_updates: open_insights 중 오늘 데이터로 확인(confirmed)·기각(rejected)할 수 있는 것만. 근거를 note에.
+
+{DF.DOC_GUIDE}
 
 {DSL_DOC}"""
     text = _call(cfg, _system(cfg, principles), user, cfg["claude"]["effort_daily"], schema=EVENING_SCHEMA)
@@ -256,34 +261,25 @@ MORNING_ITEMS = {
 def morning_briefing(cfg, principles: str, ctx: dict) -> dict:
     market = cfg.get("market", "us")
     title = "미국 장 개장 전 브리핑" if market == "us" else "한국 장 시작 전 아침 브리핑"
-    example = "NVDA" if market == "us" else "005930"
     user = f"""{title}을 작성하세요. 웹 검색으로 최신 정보를 확인하세요.
 
 <data>
 {_dump(ctx)}
 </data>
 
-포함할 내용 — 600자 이내, "• " 글머리표만, 아래 순서로:
-1) 첫 줄: 오늘의 결론 한 줄 (예: "REPL은 계획대로 진행해도 돼요" / "오늘 살 후보 없음")
-2) 후보·보유 종목마다 한 줄: 진행 또는 보류 + 이유 (뉴스·공시·5거래일 안의 실적 발표)
-3) 시장 분위기 2줄 이내 (선물·금리·유가 등 확인된 것만)
-4) 오늘 조심할 일정 1줄
-5) 마지막 줄: 한국 시간 개장·마감 시각
+채울 내용:
+- headline: 오늘의 결론 한 문장 (예: "REPL은 계획대로 진행해도 돼요" / "오늘 살 후보 없음")
+- picks: 후보(candidates)·보유(holdings) 종목마다. 뉴스·공시·5거래일 안의 실적 발표를 보고 go/hold/watch
+- sections: 🌡️ 시장 분위기(확인된 선물·금리·유가 등 2줄 이내) · 📅 오늘 일정(1~2줄) · ⏰ 개장 시각(한국 시간 1줄)
+- sources: 확인에 쓴 기사
 조사 항목 참고:
 {MORNING_ITEMS[market]}
 
-마지막 줄에 반드시 다음 형식의 JSON 한 줄을 붙이세요(보류 권고 종목코드와 이유):
-AVOID_JSON: {{"{example}": "이유"}}   (없으면 AVOID_JSON: {{}})"""
-    text = _call(cfg, _system(cfg, principles), user, cfg["claude"]["effort_daily"], web=True)
-    avoid = {}
-    m = re.search(r"AVOID_JSON:\s*(\{.*\})", text)
-    if m:
-        try:
-            avoid = {str(k): str(v) for k, v in json.loads(m.group(1)).items()}
-        except json.JSONDecodeError:
-            log.warning("could not parse AVOID_JSON")
-        text = text[: m.start()].rstrip()
-    return {"text": text, "avoid": avoid}
+{DF.DOC_GUIDE}"""
+    doc = json.loads(_call(cfg, _system(cfg, principles), user, cfg["claude"]["effort_daily"], web=True,
+                           schema=DF.DOC_SCHEMA))
+    avoid = {p["code"].upper(): p["reason"] for p in doc.get("picks", []) if p.get("decision") == "hold"}
+    return {"doc": doc, "text": DF.to_slack(doc), "avoid": avoid}
 
 
 # ---------------------------------------------------------------------------- weekly research

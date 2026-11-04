@@ -17,6 +17,7 @@ from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from . import docfmt as DF
 from . import journal as J
 from . import labels as LB
 from .config import Config
@@ -92,16 +93,46 @@ def empty(icon: str, text: str) -> str:
     return f'<div class="empty"><span>{icon}</span>{h(text)}</div>'
 
 
-def report_html(body: str) -> str:
-    """Slack-style text → light HTML: *bold*, <url|label> / [label](url) links, '•'/'-' bullets."""
-    t = h(body)
+def inline(text: str) -> str:
+    """Escape, then keep *bold* and <url|label> links from Slack-style text."""
+    t = h(text)
     t = re.sub(r"&lt;(https?://[^|&]+)\|([^&]+)&gt;", r'<a href="\1" target="_blank" rel="noopener">\2</a>', t)
-    t = re.sub(r"\[([^\]]+)\]\((https?://[^)\s]+)\)", r'<a href="\2" target="_blank" rel="noopener">\1</a>', t)
-    t = re.sub(r"\*\*(.+?)\*\*|\*(\S[^*\n]*?)\*", lambda m: f"<b>{m.group(1) or m.group(2)}</b>", t)
-    t = re.sub(r"(?m)^#{1,6}\s*(.+)$", r"<b>\1</b>", t)
-    t = re.sub(r"(?m)^\s*[-•]\s+(.+)\n?", r'<span class="li">\1</span>', t)
-    t = re.sub(r"\n{3,}", "\n\n", t).strip()
-    return f'<div class="report">{t}</div>'
+    return re.sub(r"\*(\S[^*\n]*?)\*", r"<b>\1</b>", t)
+
+
+def doc_html(doc: dict, learned: list[str] | None = None) -> str:
+    """Structured report → headline callout, per-stock decision rows, icon sections, source chips."""
+    out = []
+    if doc.get("headline"):
+        out.append(f'<div class="callout">{inline(doc["headline"])}</div>')
+    if doc.get("picks"):
+        rows = ""
+        for p in doc["picks"]:
+            icon, label = DF.DECISION.get(p.get("decision"), ("•", ""))
+            rows += (f'<li><span class="av">{h(p["code"][:4])}</span><span class="rt"><b>{h(p["code"])}'
+                     f' <em class="d-{h(p.get("decision"))}">{icon} {label}</em></b><span class="why">{inline(p.get("reason", ""))}'
+                     f'</span></span></li>')
+        out.append(f'<ul class="picks">{rows}</ul>')
+    secs = list(doc.get("sections", []))
+    if learned:
+        secs.append({"icon": "🧠", "title": "새로 배운 것", "items": learned})
+    for sec in secs:
+        items = "".join(f"<li>{inline(i)}</li>" for i in sec.get("items", []))
+        head = (f'<div class="sh"><span class="si">{h(sec.get("icon") or "•")}</span>{inline(sec.get("title", ""))}</div>'
+                if sec.get("title") or sec.get("icon") else "")
+        out.append(f'<div class="sec">{head}<ul>{items}</ul></div>')
+    if doc.get("sources"):
+        chips = "".join(f'<a href="{h(x["url"])}" target="_blank" rel="noopener">{h(x["title"][:40])}</a>'
+                        for x in doc["sources"][:6] if str(x.get("url", "")).startswith("http"))
+        out.append(f'<div class="src"><span>출처</span>{chips}</div>')
+    return '<div class="doc">' + "".join(out) + "</div>"
+
+
+def report_doc(r: dict) -> str:
+    data = json.loads(r["data"]) if r.get("data") else {}
+    if data.get("doc"):
+        return doc_html(data["doc"], data.get("learned"))
+    return doc_html(DF.parse_text(r["body"]))
 
 
 STATUS = {"active": "사용 중", "muted": "쉬는 중", "retired": "퇴역"}
@@ -205,10 +236,8 @@ def render(cfg: Config, db: DB) -> str:
             continue
         first = not tabs
         tabs += f'<button class="tab{" on" if first else ""}" data-tab="rep-{k}">{label}</button>'
-        long_ = len(r[0]["body"]) > 700
-        panes += (f'<div class="pane{" on" if first else ""}{" clamp" if long_ else ""}" id="rep-{k}"><small class="when">'
-                  f'{h(r[0]["ts"][:16].replace("T", " "))}</small>{report_html(r[0]["body"])}'
-                  + ('<button class="more">전체 보기</button>' if long_ else "") + '</div>')
+        panes += (f'<div class="pane{" on" if first else ""}" id="rep-{k}"><small class="when">'
+                  f'{h(r[0]["ts"][:16].replace("T", " "))} 작성</small>{report_doc(r[0])}</div>')
     rep_html = (f'<div class="tabs">{tabs}</div>{panes}' if tabs
                 else empty("📰", "아직 리포트가 없어요. 장이 열리는 날 아침·저녁에 생겨요."))
 
@@ -267,7 +296,7 @@ def render(cfg: Config, db: DB) -> str:
                         for p in props)
     prop_html = f'<ul class="plain">{prop_html}</ul>' if props else empty("✅", "승인할 제안이 없어요.")
     edge = db.get("edge_summary")
-    edge_html = report_html(edge) if edge else empty("🗺️", "토요일 주간 학습 뒤에 생겨요.")
+    edge_html = doc_html(DF.parse_text(edge)) if edge else empty("🗺️", "토요일 주간 학습 뒤에 생겨요.")
     more = "".join(f'<details class="fold"><summary>{t}<i class="chev"></i></summary><div>{c}</div></details>' for t, c in [
         ("가상 매매 <small>돈 없이 매일 따라 해 본 기록</small>", paper_html),
         ("학습 일지 <small>시스템이 배운 것</small>", ins_html),
@@ -337,9 +366,24 @@ em.warn{background:var(--warnbg);color:var(--warn)}
 .row[open] .kv div{border-color:color-mix(in srgb,var(--ink3) 18%,transparent)}
 .hint,.desc{color:var(--ink2);font-size:14px;margin:12px 0 0}.desc{margin:0 0 4px}
 code{background:var(--card);padding:1px 6px;border-radius:6px;font-size:13px;white-space:nowrap}
-.clamp .report{max-height:340px;overflow:hidden;-webkit-mask-image:linear-gradient(#000 70%,transparent)}
-.more{display:block;width:100%;margin-top:8px;border:0;background:var(--fill);color:var(--ink2);font:inherit;font-weight:600;
-padding:12px;border-radius:12px;cursor:pointer}
+.doc{margin-top:10px;display:flex;flex-direction:column;gap:10px}
+.callout{background:var(--downbg);color:var(--ink);border-radius:16px;padding:16px 18px;font-size:18px;font-weight:700;line-height:1.45;
+letter-spacing:-.02em}
+.picks{list-style:none;margin:0;padding:0;background:var(--fill);border-radius:16px;padding:4px 14px}
+.picks li{display:flex;gap:12px;align-items:flex-start;padding:12px 0;border-bottom:1px solid color-mix(in srgb,var(--ink3) 18%,transparent)}
+.picks li:last-child{border:0}.picks .av{background:var(--card)}.picks .rt b{font-size:16px;white-space:normal}
+.picks .why{color:var(--ink2);font-size:14.5px;line-height:1.55;margin-top:2px}
+em.d-go{background:var(--upbg);color:var(--up)}em.d-hold{background:var(--warnbg);color:var(--warn)}em.d-watch{background:var(--card)}
+.sec{background:var(--fill);border-radius:16px;padding:14px 16px}
+.sh{display:flex;align-items:center;gap:8px;font-weight:700;font-size:16px;margin-bottom:6px}
+.si{width:30px;height:30px;border-radius:10px;background:var(--card);display:grid;place-items:center;font-size:16px}
+.sec ul{list-style:none;margin:0;padding:0}.sec li{position:relative;padding:7px 0 7px 14px;color:var(--ink);font-size:15px;line-height:1.6;
+word-break:keep-all;overflow-wrap:anywhere}
+.sec li::before{content:"";position:absolute;left:2px;top:16px;width:4px;height:4px;border-radius:50%;background:var(--ink3)}
+.sec li+li{border-top:1px solid color-mix(in srgb,var(--ink3) 14%,transparent)}
+.src{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:13px}.src span{color:var(--ink3);margin-right:2px}
+.src a{background:var(--fill);color:var(--ink2);text-decoration:none;padding:5px 10px;border-radius:999px;max-width:100%;
+overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .chart{position:relative;height:170px;margin:4px 0 6px;touch-action:pan-y}.chart svg{display:block;width:100%;height:100%;overflow:visible}
 .chart .ln{fill:none;stroke-width:2;stroke-linejoin:round;stroke-linecap:round}
 .chart .ref{stroke:var(--ink3);stroke-width:1;stroke-dasharray:4 4}.chart .reflbl{fill:var(--ink3);font-size:11px}
@@ -406,8 +450,6 @@ all();
 document.querySelectorAll(".tab").forEach(function(b){b.addEventListener("click",function(){
   document.querySelectorAll(".tab,.pane").forEach(function(x){x.classList.remove("on")});
   b.classList.add("on");document.getElementById(b.dataset.tab).classList.add("on")})});
-document.querySelectorAll(".more").forEach(function(b){b.addEventListener("click",function(){
-  b.parentNode.classList.remove("clamp");b.remove()})});
 var links=[].slice.call(document.querySelectorAll("nav a"));
 function spy(){var y=window.scrollY+90,cur=links[0];links.forEach(function(a){var s=document.querySelector(a.getAttribute("href"));
   if(s&&s.offsetTop<=y)cur=a});links.forEach(function(a){a.classList.toggle("on",a===cur)})}

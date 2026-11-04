@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import yaml
 
+from . import docfmt as DF
 from . import labels as LB
 from . import analyst as AI
 from . import backtest as BT
@@ -241,11 +242,12 @@ class App:
         self.db.set("last_evening_ctx", json.dumps(ctx, ensure_ascii=False, default=str))
 
         card = self._evening_card(ctx)
-        comment, extra = "", ""
+        comment, extra, doc, learned = "", "", None, []
         if self.claude_ready:
             try:
                 out = AI.evening_report(self.cfg.raw, self.principles(), ctx)
-                comment = out["report"].strip()
+                doc = out["comment"]
+                comment = DF.to_slack(doc)
                 extra += self._handle_ai_proposals(out.get("proposals", []))
                 learned = self.save_learning("evening", out)
                 if learned:
@@ -253,8 +255,9 @@ class App:
             except Exception as e:
                 log.error("claude evening failed: %s\n%s", e, traceback.format_exc())
                 comment = f"(Claude 코멘트 실패: {e})"
-        body = card + (f"\n\n💬 *코멘트*\n{comment}" if comment else "") + extra
-        self.db.add_report("evening", body, self.now().isoformat(timespec="seconds"))
+        body = card + (f"\n\n💬 {comment}" if comment else "") + extra
+        self.db.add_report("evening", body, self.now().isoformat(timespec="seconds"),
+                           {"doc": doc, "learned": [l.lstrip("📝 ") for l in learned]} if doc else None)
         self.tg.send(body)
         return ctx
 
@@ -418,7 +421,7 @@ class App:
         body = out["text"]
         if out["avoid"]:
             body += "\n\n⛔ 오늘 보류: " + ", ".join(f"{info.get(c, {}).get('name', c)}({c})" for c in out["avoid"])
-        self.db.add_report("morning", body, self.now().isoformat(timespec="seconds"))
+        self.db.add_report("morning", body, self.now().isoformat(timespec="seconds"), {"doc": out.get("doc")})
         self.tg.send(f"☀️ 아침 브리핑 {day}\n\n{body}")
 
     # ------------------------------------------------------------------ weekly
