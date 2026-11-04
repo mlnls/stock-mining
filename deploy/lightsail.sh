@@ -14,11 +14,17 @@ git archive --format=tar.gz -o "$TMP/sm.tgz" HEAD
 scp -q -i "$KEY" "$TMP/sm.tgz" "$USER_@$HOST:/tmp/sm.tgz"
 [ -f config.yaml ] && scp -q -i "$KEY" config.yaml "$USER_@$HOST:/tmp/sm-config.yaml"
 
-# secrets: SSM (local) → stdin → host, never written to local disk
-aws ssm get-parameters-by-path --region "$REGION" --path /stockmining/ --with-decryption \
-  --query 'Parameters[].[Name,Value]' --output text \
-  | awk -F'\t' '{n=$1; sub(".*/","",n); print n "=" $2}' \
-  | "${SSH[@]}" 'umask 077; cat > /tmp/sm-secrets'
+# secrets: SSM (local) → stdin → host, never written to local disk. If SSM can't be read (expired
+# login), keep the env file already on the host.
+if SECRETS=$(aws ssm get-parameters-by-path --region "$REGION" --path /stockmining/ --with-decryption \
+      --query 'Parameters[].[Name,Value]' --output text 2>/dev/null) && [ -n "$SECRETS" ]; then
+  printf '%s\n' "$SECRETS" | awk -F'\t' '{n=$1; sub(".*/","",n); print n "=" $2}' \
+    | "${SSH[@]}" 'umask 077; cat > /tmp/sm-secrets'
+  unset SECRETS
+else
+  echo "WARN: SSM을 읽지 못해 서버에 있는 토큰을 그대로 씁니다 (aws 로그인 확인)"
+  "${SSH[@]}" 'rm -f /tmp/sm-secrets'
+fi
 
 "${SSH[@]}" "WEB_DOMAIN='${WEB_DOMAIN:-}'; "'set -e
   sudo rm -rf /tmp/sm && mkdir -p /tmp/sm && tar xzf /tmp/sm.tgz -C /tmp/sm
