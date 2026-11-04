@@ -125,6 +125,17 @@ CREATE TABLE IF NOT EXISTS insights (
     note TEXT
 );
 
+-- long-term holdings outside the swing system (e.g. KRX ETFs), shown on the dashboard with live prices
+CREATE TABLE IF NOT EXISTS holdings (
+    code TEXT PRIMARY KEY,
+    market TEXT NOT NULL,          -- kr | us
+    name TEXT,
+    qty REAL NOT NULL,
+    avg_price REAL NOT NULL,       -- in the stock's currency
+    note TEXT,
+    updated TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS kv (
     k TEXT PRIMARY KEY,
     v TEXT
@@ -269,6 +280,13 @@ class DB:
             (spec["name"], json.dumps(spec, ensure_ascii=False), source, status, now, now,
              json.dumps(backtest) if backtest else None),
         )
+
+    def set_holding(self, code: str, qty: float, avg_price: float, name: str | None, now: str) -> None:
+        market = "kr" if code.isdigit() and len(code) == 6 else "us"
+        self.execute("""INSERT INTO holdings(code,market,name,qty,avg_price,updated) VALUES(?,?,?,?,?,?)
+                        ON CONFLICT(code) DO UPDATE SET qty=excluded.qty, avg_price=excluded.avg_price,
+                        name=COALESCE(excluded.name, holdings.name), updated=excluded.updated""",
+                     (code, market, name, qty, avg_price, now))
 
     def add_report(self, kind: str, body: str, ts: str, data: dict | None = None) -> None:
         self.execute("INSERT INTO reports(ts,kind,body,data) VALUES(?,?,?,?)",

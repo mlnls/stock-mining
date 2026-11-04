@@ -34,6 +34,8 @@ def main(argv: list[str] | None = None) -> None:
     s = sub.add_parser("simulate", help="워크포워드 모의투자: 전략 선택 방식·분산 비교 + 1년 성과 확률(몬테카를로)")
     s.add_argument("--profiles", action="store_true", help="안정형/기본형/공격형 비교 + 원금 기준 예상 금액")
     s.add_argument("--start-amount", type=float, default=1_000_000, help="예상 금액 계산 원금 (기본 100만)")
+    s = sub.add_parser("hold", help="내 자산(장기 보유) 등록: hold 코드 수량 평단 / hold rm 코드 / hold")
+    s.add_argument("args", nargs="*")
     s = sub.add_parser("web", help="보기 전용 웹 대시보드 (WEB_PASSWORD 로 잠금)")
     s.add_argument("--host", default="127.0.0.1")
     s.add_argument("--port", type=int, default=8787)
@@ -67,6 +69,9 @@ def main(argv: list[str] | None = None) -> None:
     elif a.cmd == "bot":
         from . import bot
         bot.run(app)
+    elif a.cmd == "hold":
+        from . import bot
+        print(bot.handle(app, "/hold " + " ".join(a.args)))
     elif a.cmd == "backtest":
         app.seed_strategies()
         app.backtest_all()

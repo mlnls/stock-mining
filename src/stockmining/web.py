@@ -1,8 +1,9 @@
-"""Read-only web dashboard: ``stockmining web`` (stdlib HTTP server, server-rendered HTML).
+"""Read-only web dashboard: ``stockmining web`` — a small multi-page site (stdlib HTTP server).
 
-Mobile-first list-and-card layout: big numbers first, tap a row to expand its chart and details. Korean
-colour convention (rise = red, fall = blue). The DB is opened read-only; access needs HTTP basic auth with
-WEB_PASSWORD (user WEB_USER, default "me"); without a password it only listens on localhost.
+Pages: 홈 · 내 자산 · 추천 · 전략(목록·상세) · 종목 상세 · 리포트(목록·상세·학습 일지·제안·엣지 맵).
+Prices on screen are live (Naver for KRX, Yahoo for US/FX; see quotes.py) and refresh every 20 s through
+``/api/quotes``. The DB is opened read-only. Access needs HTTP basic auth with WEB_PASSWORD (user WEB_USER,
+default "me"); without a password the server only listens on localhost.
 """
 from __future__ import annotations
 
@@ -13,17 +14,23 @@ import logging
 import os
 import re
 import sqlite3
-from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs, unquote, urlparse
 
 from . import docfmt as DF
 from . import journal as J
 from . import labels as LB
+from . import quotes as Q
 from .config import Config
 from .db import DB
+from .webui import (avatar, card, chart, chips, doc_html, empty, explain, explain_exit, fold_row, h, inline, kst, kv,
+                    link_row, live, market_state, money, page, pct, report_doc, shares, tone)
 
 log = logging.getLogger(__name__)
+STATUS = {"active": "사용 중", "muted": "쉬는 중", "retired": "퇴역"}
+KIND = {"evening": ("📊", "저녁 리포트"), "morning": ("☀️", "아침 브리핑"), "weekly": ("🧠", "주간 학습"),
+        "ask": ("💬", "질문 답변"), "weekly_research": ("🔎", "주간 리서치")}
 
 
 class ReadOnlyDB(DB):
@@ -33,448 +40,432 @@ class ReadOnlyDB(DB):
         self.conn.row_factory = sqlite3.Row
 
 
-# ---------------------------------------------------------------------------- formatting
-def h(v) -> str:
-    return escape("" if v is None else str(v))
+class NotFound(Exception):
+    pass
 
 
-def money(v, us: bool = True, sign: bool = False) -> str:
-    if v is None:
-        return "-"
-    s = ("+" if v > 0 else "-" if v < 0 else "") if sign else ("-" if v < 0 else "")
-    return f"{s}${abs(v):,.2f}" if us else f"{s}{abs(v):,.0f}원"
+class Ctx:
+    def __init__(self, cfg: Config, db: DB):
+        self.cfg, self.db = cfg, db
+        self.cur = "USD" if cfg.is_us else "KRW"
+        self.info = db.ticker_info()
+        self._ctx = None
+
+    def name(self, code: str) -> str:
+        return self.info.get(code, {}).get("name") or code
+
+    @property
+    def evening(self) -> dict:
+        if self._ctx is None:
+            self._ctx = json.loads(self.db.get("last_evening_ctx") or "{}")
+        return self._ctx
+
+    def series(self, code: str, n: int = 250) -> list[tuple[str, float]]:
+        if Q.is_kr(code) and self.cfg.is_us:
+            return Q.history_kr(code, n)
+        rows = self.db.query("SELECT date, close FROM prices WHERE code=? AND close IS NOT NULL ORDER BY date DESC LIMIT ?",
+                             (code, n))
+        return [(r["date"], r["close"]) for r in reversed(rows)]
+
+    def holdings(self) -> list[dict]:
+        """Long-term holdings (holdings table) + open swing positions (journal), each with currency."""
+        try:
+            rows = self.db.query("SELECT * FROM holdings ORDER BY market, code")
+        except sqlite3.OperationalError:  # table not created yet
+            rows = []
+        out = [dict(r, cur="KRW" if r["market"] == "kr" else "USD", kind="long") for r in rows]
+        pos, _ = J.positions_and_roundtrips(self.db)
+        for c, p in pos.items():
+            out.append({"code": c, "market": "us" if self.cfg.is_us else "kr", "name": self.name(c), "qty": p["qty"],
+                        "avg_price": p["avg_price"], "cur": self.cur, "kind": "swing", "pos": p})
+        return out
+
+    def recs(self) -> tuple[str | None, list[dict]]:
+        d = self.db.query("SELECT MAX(date) d FROM recommendations")[0]["d"]
+        return d, (self.db.query("SELECT * FROM recommendations WHERE date=? ORDER BY combined_score DESC", (d,)) if d else [])
 
 
-def pct(v, digits: int = 1, sign: bool = True) -> str:
-    if v is None:
-        return "-"
-    return f"{v:+.{digits}f}%" if sign else f"{v:.{digits}f}%"
+def verdict(bt: dict) -> str:
+    pf, opf = bt.get("full", {}).get("profit_factor"), bt.get("oos", {}).get("profit_factor")
+    if pf and pf >= 1.2 and (opf or 0) >= 1.1:
+        return '<em class="good">좋음</em>'
+    if pf and pf >= 1.0:
+        return "<em>보통</em>"
+    return '<em class="bad">안 좋음</em>' if pf else ""
 
 
-def tone(v) -> str:
-    """Korean convention: gain = red ("up"), loss = blue ("down")."""
-    return "" if v is None or v == 0 else ("up" if v > 0 else "down")
+def asset_av(code: str, name: str | None) -> str:
+    n = name or code
+    if re.match(r"(KODEX|TIGER|ACE|RISE|SOL|KBSTAR|HANARO|ARIRANG|PLUS)\b", n):
+        return avatar("ETF", "etf")
+    return avatar(code)
 
 
-def shares(q) -> str:
-    return "-" if q is None else f"{round(q, 2):g}주"
+def _totals(hold: list[dict], qs: dict, fx: float) -> tuple[float, float, float, str]:
+    """(value, cost, today's change) in KRW, plus hidden markers the page script uses to keep totals live."""
+    val = cost = day = 0.0
+    marks = ""
+    for x in hold:
+        q = qs.get(x["code"]) or {}
+        m = fx if x["cur"] == "USD" else 1
+        last = q.get("price") or x["avg_price"]
+        val += last * x["qty"] * m
+        cost += x["avg_price"] * x["qty"] * m
+        day += (q.get("change") or 0) * x["qty"] * m
+        marks += (f'<i data-hold="{h(x["code"])}" data-cur="{x["cur"]}" data-qty="{x["qty"]}" '
+                  f'data-avg="{x["avg_price"]}" data-last="{last}"></i>')
+    return val, cost, day, marks
 
 
-def chart(points: list[tuple[str, float]], stop: float | None = None, avg: float | None = None) -> str:
-    """Placeholder the page script turns into a responsive line chart with hover."""
-    if len(points) < 2:
-        return ""
-    data = {"d": [p[0] for p in points], "c": [round(p[1], 4) for p in points], "stop": stop, "avg": avg}
-    return f'<div class="chart" data-chart="{h(json.dumps(data))}"></div>'
+# ---------------------------------------------------------------------------- pages
+def home(c: Ctx) -> tuple[str, str, list[str]]:
+    hold = c.holdings()
+    rdate, recs = c.recs()
+    codes = [x["code"] for x in hold] + [r["code"] for r in recs] + list(Q.INDICES)
+    qs = Q.get(codes)
+    fx = (qs.get("KRW=X") or {}).get("price") or 1350.0
+    body = []
+
+    if hold:
+        val, cost, day, marks = _totals(hold, qs, fx)
+        pnl = val - cost
+        body.append(f'<section class="hero"><small>실시간 · 원화 환산</small><span class="lbl">내 자산</span>'
+                    f'<b class="big" data-total data-fx="{fx}">{money(val, "KRW")}</b>'
+                    f'<p>총 손익 <span class="{tone(pnl)}" data-total-pnl>{money(pnl, "KRW", True)} ({pct(pnl / cost * 100 if cost else 0)})</span>'
+                    f' · 오늘 <span class="{tone(day)}" data-total-day>{money(day, "KRW", True)}</span></p>{marks}</section>')
+    else:
+        body.append('<section class="hero"><span class="lbl">내 자산</span><b class="big">아직 없어요</b>'
+                    '<p>슬랙에서 <code>hold 코드 수량 평단</code> 으로 등록하세요</p></section>')
+
+    mk = ""
+    for code, label in Q.INDICES.items():
+        q = qs.get(code) or {}
+        price = "-" if q.get("price") is None else (f'{q["price"]:,.1f}원' if code == "KRW=X" else f'{q["price"]:,.2f}')
+        mk += (f'<a><span>{label}</span><b>{price}</b>'
+               f'<small class="{tone(q.get("change"))}">{pct(q.get("change_pct"))}</small></a>')
+    body.append(f'<div class="mkt">{mk}</div>')
+
+    if hold:
+        lst = ""
+        for x in hold[:4]:
+            q = qs.get(x["code"])
+            lst += link_row(f"/stock/{x['code']}", asset_av(x["code"], x["name"]), h(x["name"] or x["code"]),
+                            shares(x["qty"]), live(x["code"], "val", q, x["cur"], x["qty"]),
+                            live(x["code"], "pnl", q, x["cur"], x["qty"], x["avg_price"]))
+        body.append(card("내 자산", lst, ("/assets", "전체")))
+
+    lst = ""
+    for r in recs:
+        q = qs.get(r["code"])
+        lst += link_row(f"/stock/{r['code']}", avatar(r["code"]), f'{h(r["code"])} <small class="nm">{h(c.name(r["code"]))}</small>',
+                        h(LB.strat(r["strategy"])) + (' · <em class="warn">보류</em>' if r["flagged"] else ""),
+                        live(r["code"], "price", q, c.cur), "기준가 대비 " + live(r["code"], "vs", q, c.cur, ref=r["entry_ref"]))
+    body.append(card("내일 살 후보", lst or empty("😴", "내일 살 종목이 없어요."), ("/picks", "자세히"),
+                     f"{len(recs)}개" if recs else ""))
+
+    r = c.db.query("SELECT * FROM reports WHERE kind IN ('evening','morning') ORDER BY id DESC LIMIT 1")
+    if r:
+        d = report_doc(r[0])["doc"]
+        icon, label = KIND.get(r[0]["kind"], ("📄", r[0]["kind"]))
+        head = d.get("headline") or next((s["title"] for s in d.get("sections", []) if s.get("title")), "")
+        body.append(card(f"{icon} {label}", f'<a href="/report/{r[0]["id"]}"><div class="callout">{inline(head)}</div></a>'
+                         f'<p class="lead" style="margin-top:8px">{h(kst(r[0]["ts"]))} 작성</p>', ("/reports", "전체")))
+    return "Stock Mining", "".join(body), codes
 
 
-def series(db: DB, code: str, n: int = 120) -> list[tuple[str, float]]:
-    rows = db.query("SELECT date, close FROM prices WHERE code=? AND close IS NOT NULL ORDER BY date DESC LIMIT ?",
-                    (code, n))
-    return [(r["date"], r["close"]) for r in reversed(rows)]
+def assets(c: Ctx) -> tuple[str, str, list[str]]:
+    hold = c.holdings()
+    codes = [x["code"] for x in hold] + ["KRW=X"]
+    qs = Q.get(codes)
+    fx = (qs.get("KRW=X") or {}).get("price") or 1350.0
+    val, cost, day, marks = _totals(hold, qs, fx)
+    pnl = val - cost
+    out = [f'<section class="hero"><small>실시간 · 달러는 환율 {fx:,.1f}원으로 환산</small><span class="lbl">총 평가금액</span>'
+           f'<b class="big" data-total data-fx="{fx}">{money(val, "KRW")}</b>'
+           f'<div class="grid2" style="margin-top:12px"><div class="stat"><span>총 손익</span><b class="{tone(pnl)}" data-total-pnl>'
+           f'{money(pnl, "KRW", True)} ({pct(pnl / cost * 100 if cost else 0)})</b></div>'
+           f'<div class="stat"><span>오늘 변동</span><b class="{tone(day)}" data-total-day>{money(day, "KRW", True)}</b></div>'
+           f'<div class="stat"><span>산 금액</span><b>{money(cost, "KRW")}</b></div>'
+           f'<div class="stat"><span>종목 수</span><b>{len(hold)}개</b></div></div>{marks}</section>']
+    groups: dict[str, list[dict]] = {"국내 장기 보유": [], "해외 장기 보유": [], "스윙 매매": []}
+    for x in hold:
+        key = "스윙 매매" if x["kind"] == "swing" else ("국내 장기 보유" if x["market"] == "kr" else "해외 장기 보유")
+        groups[key].append(x)
+    for title, items in groups.items():
+        if not items:
+            continue
+        lst = ""
+        for x in items:
+            q = qs.get(x["code"])
+            sub = shares(x["qty"]) + " · 평단 " + money(x["avg_price"], x["cur"])
+            lst += link_row(f"/stock/{x['code']}", asset_av(x["code"], x["name"]), h(x["name"] or x["code"]), sub,
+                            live(x["code"], "val", q, x["cur"], x["qty"]), live(x["code"], "pnl", q, x["cur"], x["qty"], x["avg_price"]))
+        out.append(card(title, lst, count=f"{len(items)}개"))
+    if not hold:
+        out.append(card("내 자산", empty("📭", "등록된 자산이 없어요.")))
+    out.append('<p class="hint" style="text-align:center">추가·수정은 슬랙에서 <code>hold 코드 수량 평단</code> · 삭제 <code>hold rm 코드</code><br>'
+               '스윙 매매는 <code>buy</code>/<code>sell</code> 기록에서 자동으로 들어와요</p>')
+    return "내 자산", "".join(out), codes
 
 
-def kv(items: list[tuple[str, str]]) -> str:
-    return '<dl class="kv">' + "".join(f"<div><dt>{k}</dt><dd>{v}</dd></div>" for k, v in items) + "</dl>"
-
-
-def avatar(code: str) -> str:
-    return f'<span class="av">{h(code[:4])}</span>'
-
-
-def row(code: str, title: str, sub: str, right: str, right_sub: str, body: str, open_: bool = False) -> str:
-    return (f'<details class="row"{" open" if open_ else ""}><summary>{avatar(code)}'
-            f'<span class="rt"><b>{title}</b><small>{sub}</small></span>'
-            f'<span class="rr"><b>{right}</b><small>{right_sub}</small></span><i class="chev"></i></summary>'
-            f'<div class="rb">{body}</div></details>')
-
-
-def empty(icon: str, text: str) -> str:
-    return f'<div class="empty"><span>{icon}</span>{h(text)}</div>'
-
-
-def inline(text: str) -> str:
-    """Escape, then keep *bold* and <url|label> links from Slack-style text."""
-    t = h(text)
-    t = re.sub(r"&lt;(https?://[^|&]+)\|([^&]+)&gt;", r'<a href="\1" target="_blank" rel="noopener">\2</a>', t)
-    return re.sub(r"\*(\S[^*\n]*?)\*", r"<b>\1</b>", t)
-
-
-def doc_html(doc: dict, learned: list[str] | None = None) -> str:
-    """Structured report → headline callout, per-stock decision rows, icon sections, source chips."""
-    out = []
-    if doc.get("headline"):
-        out.append(f'<div class="callout">{inline(doc["headline"])}</div>')
-    if doc.get("picks"):
-        rows = ""
-        for p in doc["picks"]:
-            icon, label = DF.DECISION.get(p.get("decision"), ("•", ""))
-            rows += (f'<li><span class="av">{h(p["code"][:4])}</span><span class="rt"><b>{h(p["code"])}'
-                     f' <em class="d-{h(p.get("decision"))}">{icon} {label}</em></b><span class="why">{inline(p.get("reason", ""))}'
-                     f'</span></span></li>')
-        out.append(f'<ul class="picks">{rows}</ul>')
-    secs = list(doc.get("sections", []))
-    if learned:
-        secs.append({"icon": "🧠", "title": "새로 배운 것", "items": learned})
-    for sec in secs:
-        items = "".join(f"<li>{inline(i)}</li>" for i in sec.get("items", []))
-        head = (f'<div class="sh"><span class="si">{h(sec.get("icon") or "•")}</span>{inline(sec.get("title", ""))}</div>'
-                if sec.get("title") or sec.get("icon") else "")
-        out.append(f'<div class="sec">{head}<ul>{items}</ul></div>')
-    if doc.get("sources"):
-        chips = "".join(f'<a href="{h(x["url"])}" target="_blank" rel="noopener">{h(x["title"][:40])}</a>'
-                        for x in doc["sources"][:6] if str(x.get("url", "")).startswith("http"))
-        out.append(f'<div class="src"><span>출처</span>{chips}</div>')
-    return '<div class="doc">' + "".join(out) + "</div>"
-
-
-def report_doc(r: dict) -> str:
-    data = json.loads(r["data"]) if r.get("data") else {}
-    if data.get("doc"):
-        return doc_html(data["doc"], data.get("learned"))
-    return doc_html(DF.parse_text(r["body"]))
-
-
-def kst(ts: str) -> str:
-    """Stored timestamps are in the market's timezone; show them in Korean time."""
-    from datetime import datetime
-    from zoneinfo import ZoneInfo
-    try:
-        return datetime.fromisoformat(ts).astimezone(ZoneInfo("Asia/Seoul")).strftime("%-m월 %-d일 %H:%M")
-    except ValueError:
-        return ts[:16].replace("T", " ")
-
-
-STATUS = {"active": "사용 중", "muted": "쉬는 중", "retired": "퇴역"}
-
-
-# ---------------------------------------------------------------------------- page
-def render(cfg: Config, db: DB) -> str:
-    us = cfg.is_us
-    info = db.ticker_info()
-    name = lambda c: info.get(c, {}).get("name") or c  # noqa: E731
-    ctx = json.loads(db.get("last_evening_ctx") or "{}")
-    last_day = db.last_price_date() or ""
-    acct, cap = cfg["account"], cfg["account"].get("capital") or 0
-
-    from . import regime as RG
-    idx = db.load_index(cfg["regime_index"])
-    market = RG.describe(idx) if not idx.empty else {}
-
-    # ---- holdings
-    pos, trips = J.positions_and_roundtrips(db)
-    if pos:
-        J.position_alerts(pos, db.load_panel(list(pos), None))
-    value = sum(p["qty"] * (p.get("last_close") or p["avg_price"]) for p in pos.values())
-    cost = sum(p["qty"] * p["avg_price"] for p in pos.values())
-    pnl = value - cost if pos else None
-    realized = sum((t["sell"] - t["buy"]) * t["qty"] for t in trips if t["sell"] and t["buy"])
-
-    # ---- hero
-    d = last_day[5:].replace("-", "/") if last_day else ""
-    hero_sub = (f'<span class="{tone(pnl)}">{money(pnl, us, True)} ({pct(pnl / cost * 100 if cost else 0, 2)})</span>'
-                f' · 보유 {len(pos)}종목' if pos else "아직 보유한 종목이 없어요")
-    chips = [f'시장 <b>{h(LB.regime(market.get("regime")))}</b>',
-             f'{"S&P500" if us else h(cfg["regime_index"])} 한 달 '
-             f'<b class="{tone(market.get("chg_20d_pct"))}">{pct(market.get("chg_20d_pct"))}</b>',
-             f'<b>{h({"aggressive": "공격형", "normal": "기본형"}.get(cfg["profile"], cfg["profile"]))}</b>']
-    if trips:
-        chips.append(f'실현 손익 <b class="{tone(realized)}">{money(realized, us, True)}</b>')
-    hero = (f'<section class="hero"><small>{h(d)} 장 마감 기준</small><span>운용 자금</span>'
-            f'<b class="big">{money(cap, us)}</b><p>{hero_sub}</p>'
-            f'<div class="chips">{"".join(f"<span>{c}</span>" for c in chips)}</div></section>')
-
-    alerts = "".join(f'<div class="alert">{h(a)}</div>' for a in ctx.get("alerts") or [])
-
-    # ---- tomorrow's candidates
-    rdate = db.query("SELECT MAX(date) d FROM recommendations")[0]["d"]
-    recs = db.query("SELECT * FROM recommendations WHERE date=? ORDER BY combined_score DESC", (rdate,)) if rdate else []
-    earn = {r["code"]: r.get("next_earnings") for r in ctx.get("recommendations", [])}
-    rec_html = ""
+def picks(c: Ctx) -> tuple[str, str, list[str]]:
+    rdate, recs = c.recs()
+    qs = Q.get([r["code"] for r in recs])
+    cap = c.cfg["account"].get("capital") or 0
+    earn = {r["code"]: r.get("next_earnings") for r in c.evening.get("recommendations", [])}
+    lst = ""
     for i, r in enumerate(recs):
-        pts = series(db, r["code"])
-        chg = (pts[-1][1] / pts[-60][1] - 1) * 100 if len(pts) >= 60 else None
-        price, stop, q = r["entry_ref"], r["stop"], r["shares"]
-        need = price * q if price and q else None
-        risk = (price - stop) * q if price and stop and q else None
-        drop = (stop / price - 1) * 100 if price and stop else None
-        items = [("살 가격", f"{money(price, us)} 근처"),
-                 ("손절가", f'{money(stop, us)} <small class="down">{pct(drop, 1)}</small>'),
-                 ("목표가", money(r["target"], us) if r["target"] else "없음 · 오르는 동안 보유"),
-                 ("수량", shares(q)),
-                 ("필요한 돈", f"{money(need, us)}" + (f" <small>내 돈의 {need / cap:.0%}</small>" if need and cap else "")),
-                 ("틀리면 최대", f'<span class="down">{money(-risk if risk else None, us)}</span>'
+        q = qs.get(r["code"])
+        price, stop, qty = r["entry_ref"], r["stop"], r["shares"]
+        need = price * qty if price and qty else None
+        risk = (price - stop) * qty if price and stop and qty else None
+        items = [("지금 가격", live(r["code"], "price", q, c.cur) + " " + market_state(q)),
+                 ("기준가 대비", live(r["code"], "vs", q, c.cur, ref=price)),
+                 ("살 가격", f"{money(price, c.cur)} 근처"),
+                 ("손절가", f'{money(stop, c.cur)} <small class="down">{pct((stop / price - 1) * 100 if price and stop else None, 1)}</small>'),
+                 ("목표가", money(r["target"], c.cur) if r["target"] else "없음 · 오르는 동안 보유"),
+                 ("수량", shares(qty)),
+                 ("필요한 돈", money(need, c.cur) + (f" <small>내 돈의 {need / cap:.0%}</small>" if need and cap else "")),
+                 ("틀리면 최대", f'<span class="down">{money(-risk if risk else None, c.cur)}</span>'
                   + (f" <small>내 돈의 {risk / cap:.0%}</small>" if risk and cap else ""))]
         if earn.get(r["code"]):
             items.append(("다음 실적 발표", h(earn[r["code"]])))
-        flag = (f'<div class="alert">⛔ 아침 브리핑에서 보류 권고: {h(r["flagged"])}</div>' if r["flagged"] else "")
-        body = (flag + chart(pts, stop) + kv(items) +
-                '<p class="hint">지정가로 사고, 크게 갭상승해서 시작하면 쫓아가지 마세요. 사면 슬랙에 '
-                f'<code>buy {h(r["code"])} 가격 수량</code> 으로 기록하세요.</p>')
-        sub = h(LB.strat(r["strategy"])) + (' · <em class="warn">보류</em>' if r["flagged"] else "")
-        rec_html += row(r["code"], f'{h(r["code"])} <small class="nm">{h(name(r["code"]))}</small>', sub,
-                        money(price, us), f'<span class="{tone(chg)}">3개월 {pct(chg)}</span>' if chg is not None else "",
-                        body, open_=(i == 0))
-    rec_html = rec_html or empty("😴", "내일 살 종목이 없어요. 쉬어 가는 날이에요.")
+        flag = f'<div class="alert">⛔ 아침 브리핑 보류 권고: {h(r["flagged"])}</div>' if r["flagged"] else ""
+        body = (flag + chart(c.series(r["code"], 120), c.cur, {"stop": stop, "entry": price}) + kv(items)
+                + f'<p class="hint">지정가로 사고, 크게 갭상승하면 쫓아가지 마세요. 사면 슬랙에 <code>buy {h(r["code"])} 가격 수량</code>'
+                  f'<br><a href="/strategy/{h(r["strategy"])}"><b>이 전략 보기 ›</b></a> · <a href="/stock/{h(r["code"])}"><b>종목 보기 ›</b></a></p>')
+        lst += fold_row(avatar(r["code"]), f'{h(r["code"])} <small class="nm">{h(c.name(r["code"]))}</small>',
+                        h(LB.strat(r["strategy"])) + (' · <em class="warn">보류</em>' if r["flagged"] else ""),
+                        live(r["code"], "price", q, c.cur), "기준가 대비 " + live(r["code"], "vs", q, c.cur, ref=price), body, i == 0)
+    out = [card("내일 살 후보", lst or empty("😴", "내일 살 종목이 없어요. 쉬어 가는 날이에요."), count=f"{len(recs)}개" if recs else "")]
+    skipped = c.evening.get("skipped_for_earnings") or []
+    if skipped:
+        out.append(card("🚫 뺀 종목", "".join(
+            link_row(f"/stock/{s['code']}", avatar(s["code"]), h(s["code"]), f"실적 발표 {h(s['next_earnings'])} 임박", "")
+            for s in skipped)))
+    if rdate:
+        out.append(f'<p class="updated">{h(rdate)} 장 마감 기준으로 고른 후보예요</p>')
+    return "추천", "".join(out), [r["code"] for r in recs]
 
-    # ---- my stocks
-    pos_html = ""
-    for c, p in pos.items():
-        last = p.get("last_close")
-        v = p["qty"] * (last or p["avg_price"])
-        items = [("수량", shares(p["qty"])), ("평균 산 가격", money(p["avg_price"], us)), ("현재가", money(last, us)),
-                 ("손절가", money(p["plan_stop"], us) if p["plan_stop"] else '<em class="warn">미설정 · 꼭 정하세요</em>'),
-                 ("목표가", money(p["plan_target"], us)), ("고른 이유", h(LB.strat(p["strategy"]))),
-                 ("처음 산 날", h(p["first_buy"]))]
-        pos_html += row(c, f'{h(c)} <small class="nm">{h(name(c))}</small>', shares(p["qty"]), money(v, us),
-                        f'<span class="{tone(p.get("pnl_pct"))}">{money((last - p["avg_price"]) * p["qty"] if last else None, us, True)}'
-                        f' ({pct(p.get("pnl_pct"), 2)})</span>', chart(series(db, c), p["plan_stop"], p["avg_price"]) + kv(items))
-    pos_html = pos_html or empty("📭", "보유 종목이 없어요. 사면 슬랙에 buy 티커 가격 수량 으로 기록하세요.")
-    trip_html = "".join(
-        f'<li><span>{avatar(t["code"])}<span class="rt"><b>{h(t["code"])}</b><small>{h(t["sell_date"])} 매도 · '
-        f'{shares(t["qty"])}</small></span></span><b class="{tone(t["ret_pct"])}">{pct(t["ret_pct"], 2)}</b></li>'
-        for t in reversed(trips[-15:]))
-    if trip_html:
-        pos_html += f'<h3>판 기록</h3><ul class="plain">{trip_html}</ul>'
 
-    # ---- reports
-    kinds = {"evening": "저녁 리포트", "morning": "아침 브리핑", "weekly": "주간 학습", "ask": "질문 답변"}
-    tabs, panes = "", ""
-    for k, label in kinds.items():
-        r = db.query("SELECT * FROM reports WHERE kind=? ORDER BY id DESC LIMIT 1", (k,))
-        if not r:
-            continue
-        first = not tabs
-        tabs += f'<button class="tab{" on" if first else ""}" data-tab="rep-{k}">{label}</button>'
-        panes += (f'<div class="pane{" on" if first else ""}" id="rep-{k}"><small class="when">'
-                  f'{h(kst(r[0]["ts"]))} 작성 (한국 시간)</small>{report_doc(r[0])}</div>')
-    rep_html = (f'<div class="tabs">{tabs}</div>{panes}' if tabs
-                else empty("📰", "아직 리포트가 없어요. 장이 열리는 날 아침·저녁에 생겨요."))
-
-    # ---- strategies
-    weights = ctx.get("weights", {})
-    strat_html = ""
-    strats = db.strategies(("active", "muted", "retired"))
+def strategies(c: Ctx) -> tuple[str, str, list[str]]:
+    strats = c.db.strategies(("active", "muted", "retired"))
     strats.sort(key=lambda s: -((s["backtest"] or {}).get("full", {}).get("expectancy_pct") or -99))
+    weights = c.evening.get("weights", {})
+    lst = ""
     for s in strats:
         bt = s["backtest"] or {}
-        f, o = bt.get("full", {}), bt.get("oos", {})
-        pf, opf = f.get("profit_factor"), o.get("profit_factor")
-        if pf and pf >= 1.2 and (opf or 0) >= 1.1:
-            verdict = '<em class="good">좋음</em>'
-        elif pf and pf >= 1.0:
-            verdict = '<em>보통</em>'
+        f = bt.get("full", {})
+        p = c.db.query("SELECT COUNT(*) n FROM paper_trades WHERE strategy=?", (s["name"],))[0]["n"]
+        sub = f"{verdict(bt)} 이긴 비율 {pct(f.get('win_rate'), 0, False)} · 가상 매매 {p}번"
+        if weights.get(s["name"]):
+            sub += f" · 비중 {weights[s['name']]:.0%}"
+        lst += link_row(f"/strategy/{s['name']}", avatar(LB.strat(s["name"])[:2]),
+                        h(LB.strat(s["name"])) + ("" if s["status"] == "active" else f' <em>{STATUS.get(s["status"])}</em>'),
+                        sub, f'<span class="{tone(f.get("expectancy_pct"))}">{pct(f.get("expectancy_pct"))}</span>', "한 번 거래 평균")
+    body = card("전략 성적표", '<p class="lead">과거 5년 데이터로 시험해 본 결과예요. 누르면 어떤 전략인지 볼 수 있어요.</p>' + lst,
+                count=f"{len(strats)}개")
+    return "전략", body, []
+
+
+def strategy(c: Ctx, name: str) -> tuple[str, str, list[str]]:
+    rows = [s for s in c.db.strategies(("active", "muted", "retired")) if s["name"] == name]
+    if not rows:
+        raise NotFound
+    s = rows[0]
+    from . import rules as R
+    spec = R.resolve(s["spec"])
+    bt = s["backtest"] or {}
+    f, o = bt.get("full", {}), bt.get("oos", {})
+    out = [f'<section class="hero"><small>{h(name)} · {h(STATUS.get(s["status"], s["status"]))}</small>'
+           f'<span class="lbl">{verdict(bt)}</span><b class="big" style="font-size:28px">{h(LB.strat(name))}</b>'
+           f'<p class="desc">{h((s["spec"].get("description") or "").strip())}</p>'
+           + (f'<p class="lead" style="margin-top:8px">출처: {h(s["spec"].get("source_note"))}</p>' if s["spec"].get("source_note") else "")
+           + "</section>"]
+
+    ent = spec["entry"]
+    conds = "".join(f"<li>{h(explain(e))}<code>{h(e)}</code></li>" for e in ent["all"])
+    if ent.get("any"):
+        conds += "<li>다음 중 하나라도: " + " / ".join(h(explain(e)) for e in ent["any"]) + "</li>"
+    regimes = spec.get("regimes") or ["bull", "neutral", "bear"]
+    how = ("조건이 모두 맞은 다음 날 시가에 산다" if ent.get("type", "next_open") == "next_open"
+           else f"다음 날 시가 + 전날 변동폭×{ent.get('k')}를 넘으면 산다")
+    rank = spec.get("rank")
+    rank_txt = (f" 후보가 많으면 {h(explain(rank.lstrip('-')))}이(가) {'작은' if rank.startswith('-') else '큰'} 순서로 고른다."
+                if rank else "")
+    out.append(card("언제 사나요", f'<ol class="steps">{conds}</ol><p class="hint">{how}. '
+                    f'시장이 {"·".join(LB.regime(r) for r in regimes)}일 때만 산다.{rank_txt}</p>'))
+    out.append(card("언제 파나요", '<ol class="steps">' + "".join(f"<li>{h(x)}</li>" for x in explain_exit(spec["exit"])) + "</ol>"))
+
+    def stat(label, a, b, fmt):
+        return f"<tr><td>{label}</td><td>{fmt(a)}</td><td>{fmt(b)}</td></tr>"
+    signed = lambda v: f'<span class="{tone(v)}">{pct(v)}</span>'  # noqa: E731
+    tbl = ('<table class="t"><tr><th></th><th>전체 기간</th><th>최근 구간</th></tr>'
+           + stat("거래 횟수", f.get("trades"), o.get("trades"), lambda v: f"{v}번" if v is not None else "-")
+           + stat("이긴 비율", f.get("win_rate"), o.get("win_rate"), lambda v: pct(v, 0, False))
+           + stat("한 번 거래 평균", f.get("expectancy_pct"), o.get("expectancy_pct"), signed)
+           + stat("번 돈 ÷ 잃은 돈", f.get("profit_factor"), o.get("profit_factor"), lambda v: "-" if v is None else f"{v:.2f}")
+           + stat("1년 수익률", f.get("cagr_pct"), o.get("cagr_pct"), signed)
+           + stat("최악일 때 하락", f.get("mdd_pct"), o.get("mdd_pct"), lambda v: "-" if v is None else f'<span class="down">-{v:.0f}%</span>')
+           + stat("평균 보유", f.get("avg_hold"), o.get("avg_hold"), lambda v: "-" if v is None else f"{v:.0f}일")
+           + "</table>")
+    out.append(card("과거 성적", tbl + (f'<p class="lead" style="margin-top:8px">최근 구간 = {h(bt.get("split"))} 이후 '
+                                       '(규칙을 고를 때 안 본 기간). 번 돈 ÷ 잃은 돈이 1보다 크면 버는 전략이에요.</p>'
+                                       if bt.get("split") else "")))
+    reg = f.get("by_regime") or {}
+    if reg:
+        order = {"bull": 0, "neutral": 1, "bear": 2}
+        rr = "".join(f'<tr><td>{h(LB.regime(k))}</td><td>{v["trades"]}번</td><td>{pct(v["win_rate"], 0, False)}</td>'
+                     f'<td class="{tone(v["expectancy_pct"])}">{pct(v["expectancy_pct"])}</td></tr>'
+                     for k, v in sorted(reg.items(), key=lambda kv_: order.get(kv_[0], 9)))
+        out.append(card("시장 분위기별", f'<table class="t"><tr><th></th><th>거래</th><th>이긴 비율</th><th>한 번 평균</th></tr>{rr}</table>'))
+
+    sd = c.db.query("SELECT MAX(date) d FROM signals WHERE strategy=?", (name,))[0]["d"]
+    sigs = c.db.query("SELECT * FROM signals WHERE strategy=? AND date=? ORDER BY score DESC LIMIT 15", (name, sd)) if sd else []
+    paper = c.db.query("SELECT * FROM paper_trades WHERE strategy=? "
+                       "ORDER BY COALESCE(exit_date, entry_date, signal_date) DESC LIMIT 20", (name,))
+    codes = [x["code"] for x in sigs] + [p["code"] for p in paper if p["status"] in ("open", "pending")]
+    qs = Q.get(codes)
+    lst = "".join(link_row(f"/stock/{x['code']}", avatar(x["code"]), f'{h(x["code"])} <small class="nm">{h(c.name(x["code"]))}</small>',
+                           f"신호 때 {money(x['close'], c.cur)} · 손절 {money(x['stop'], c.cur)}",
+                           live(x["code"], "price", qs.get(x["code"]), c.cur),
+                           "신호 대비 " + live(x["code"], "vs", qs.get(x["code"]), c.cur, ref=x["close"])) for x in sigs)
+    out.append(card("최근 신호", lst or empty("🔕", "최근에 신호가 나온 종목이 없어요."), count=h(sd or "")))
+    pl = ""
+    for p in paper:
+        if p["status"] == "closed":
+            right, rs = f'<span class="{tone(p["ret_pct"])}">{pct(p["ret_pct"])}</span>', f"{h(p['exit_date'])} 정리"
         else:
-            verdict = '<em class="bad">안 좋음</em>' if pf else ""
-        p = db.query("SELECT COUNT(*) n, AVG(ret_pct) a FROM paper_trades WHERE strategy=? AND status='closed'",
-                     (s["name"],))[0]
-        po = db.query("SELECT COUNT(*) n FROM paper_trades WHERE strategy=? AND status IN ('open','pending')",
-                      (s["name"],))[0]["n"]
-        items = [("이긴 비율", pct(f.get("win_rate"), 0, False)), ("거래 횟수", f'{f.get("trades", "-")}번'),
-                 ("최근 성적", f'<span class="{tone(o.get("expectancy_pct"))}">{pct(o.get("expectancy_pct"), 2)}</span> <small>한 번 평균</small>'),
-                 ("최악일 때 하락", f'<span class="down">{pct(-(f.get("mdd_pct") or 0), 0)}</span>'),
-                 ("가상 매매", f'{p["n"]}번 끝 · {po}번 진행 중' + (f' · 평균 <span class="{tone(p["a"])}">{pct(p["a"], 2)}</span>' if p["n"] else "")),
-                 ("상태", STATUS.get(s["status"], s["status"]) + (f' · 지금 비중 {weights[s["name"]]:.0%}' if weights.get(s["name"]) else ""))]
-        body = f'<p class="desc">{h((s["spec"].get("description") or "").strip())}</p>' + kv(items)
-        strat_html += row(LB.strat(s["name"])[:2], h(LB.strat(s["name"])), f"{verdict} 이긴 비율 {pct(f.get('win_rate'), 0, False)}",
-                          f'<span class="{tone(f.get("expectancy_pct"))}">{pct(f.get("expectancy_pct"), 2)}</span>',
-                          "한 번 거래 평균", body)
-    strat_html = (f'<p class="lead">과거 5년 데이터로 시험해 본 결과예요. 오른쪽 숫자는 이 방식으로 한 번 사고팔 때 평균 수익이에요.</p>'
-                  + strat_html) if strat_html else empty("🧪", "전략이 없어요.")
-
-    # ---- more: paper trades, learning log, proposals, edge map
-    paper = db.query("SELECT * FROM paper_trades WHERE status IN ('open','pending') ORDER BY signal_date DESC LIMIT 30")
-    closed = db.query("SELECT * FROM paper_trades WHERE status='closed' ORDER BY exit_date DESC LIMIT 30")
-    li = lambda code, t, sub, right: (f'<li><span>{avatar(code)}<span class="rt"><b>{t}</b><small>{sub}</small></span></span>'  # noqa: E731
-                                      f'{right}</li>')
-    paper_html = "".join(li(p["code"], h(p["code"]), f'{h(LB.strat(p["strategy"]))} · {h(p["signal_date"])}',
-                            f'<small>{"사기 전" if p["status"] == "pending" else "들고 있음"}</small>') for p in paper)
-    paper_html += "".join(li(p["code"], h(p["code"]), f'{h(LB.strat(p["strategy"]))} · {h(p["exit_date"])} 정리',
-                             f'<b class="{tone(p["ret_pct"])}">{pct(p["ret_pct"], 2)}</b>') for p in closed)
-    paper_html = (f'<ul class="plain">{paper_html}</ul>' if paper_html
-                  else empty("🎮", "가상 매매 기록이 아직 없어요. 매일 저녁 자동으로 쌓여요."))
-    status_ko = {"open": "확인 중", "confirmed": "맞았음", "rejected": "틀렸음"}
-    ins = db.query("SELECT * FROM insights ORDER BY id DESC LIMIT 30")
-    ins_html = "".join(f'<li class="note"><em class="{ {"confirmed": "good", "rejected": "bad"}.get(i["status"], "")}">'
-                       f'{status_ko.get(i["status"], i["status"])}</em> {h(i["text"])}'
-                       + (f'<small>→ {h(i["note"])}</small>' if i["note"] else "") + f'<small>{h(i["ts"][:10])}</small></li>'
-                       for i in ins)
-    ins_html = f'<ul class="plain">{ins_html}</ul>' if ins else empty("📒", "시스템이 배운 것이 아직 없어요.")
-    props = db.query("SELECT * FROM proposals WHERE status='pending' ORDER BY id")
-    prop_html = "".join(f'<li class="note"><b>#{p["id"]} {h(p["title"])}</b><small>{h((p["rationale"] or "")[:400])}</small>'
-                        f'<small>슬랙에서 <code>approve {p["id"]}</code> 또는 <code>reject {p["id"]}</code></small></li>'
-                        for p in props)
-    prop_html = f'<ul class="plain">{prop_html}</ul>' if props else empty("✅", "승인할 제안이 없어요.")
-    edge = db.get("edge_summary")
-    edge_html = doc_html(DF.parse_text(edge)) if edge else empty("🗺️", "토요일 주간 학습 뒤에 생겨요.")
-    more = "".join(f'<details class="fold"><summary>{t}<i class="chev"></i></summary><div>{c}</div></details>' for t, c in [
-        ("가상 매매 <small>돈 없이 매일 따라 해 본 기록</small>", paper_html),
-        ("학습 일지 <small>시스템이 배운 것</small>", ins_html),
-        (f"승인 대기 제안 <small>{len(props)}개</small>", prop_html),
-        ("엣지 맵 <small>어떤 조건에서 벌고 잃는지</small>", edge_html)])
-
-    sections = [
-        ("recs", "내일 살 후보", f"{len(recs)}개" if recs else "", rec_html),
-        ("mine", "내 주식", f"{len(pos)}종목" if pos else "", pos_html),
-        ("reports", "리포트", "", rep_html),
-        ("strats", "전략 성적표", f"{len(strats)}개", strat_html),
-        ("more", "더 보기", "", more),
-    ]
-    nav = "".join(f'<a href="#{i}">{t}</a>' for i, t, _, _ in sections)
-    body = "".join(f'<section class="card" id="{i}"><h2>{t} <small>{n}</small></h2>{c}</section>' for i, t, n, c in sections)
-    return PAGE.replace("{{nav}}", nav).replace("{{hero}}", hero + alerts).replace("{{body}}", body)
+            right = live(p["code"], "vs", qs.get(p["code"]), c.cur, ref=p["entry_price"]) if p["entry_price"] else "사기 전"
+            rs = "들고 있음" if p["status"] == "open" else "다음 날 시가에 삼"
+        pl += link_row(f"/stock/{p['code']}", avatar(p["code"]), h(p["code"]), f"{h(p['signal_date'])} 신호", right, rs)
+    out.append(card("가상 매매", pl or empty("🎮", "아직 기록이 없어요. 매일 저녁 자동으로 쌓여요.")))
+    return LB.strat(name), "".join(out), codes
 
 
-PAGE = """<!doctype html>
-<html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="robots" content="noindex,nofollow"><meta name="theme-color" content="#f2f4f6"><title>Stock Mining</title>
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
-<style>
-:root{color-scheme:light;--bg:#f2f4f6;--card:#fff;--line:#eef0f3;--ink:#191f28;--ink2:#4e5968;--ink3:#8b95a1;--fill:#f2f4f6;
---accent:#3182f6;--up:#f04452;--down:#3182f6;--upbg:#fdeef0;--downbg:#e8f3ff;--warn:#c27a00;--warnbg:#fff4e0}
-@media (prefers-color-scheme:dark){:root{color-scheme:dark;--bg:#101013;--card:#1c1c21;--line:#2a2a31;--ink:#f2f3f5;--ink2:#b0b8c1;
---ink3:#7e8792;--fill:#2a2a31;--accent:#4c94ff;--up:#ff5c6a;--down:#4c94ff;--upbg:#3a1f24;--downbg:#1a2a44;--warn:#ffb340;--warnbg:#3a2a10}}
-*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 "Pretendard Variable",Pretendard,-apple-system,BlinkMacSystemFont,
-"Apple SD Gothic Neo","Noto Sans KR",sans-serif;-webkit-font-smoothing:antialiased;letter-spacing:-.01em}
-.wrap{max-width:600px;margin:0 auto;padding:0 12px 48px}
-nav{position:sticky;top:0;z-index:5;background:color-mix(in srgb,var(--bg) 88%,transparent);backdrop-filter:blur(10px)}
-nav div{max-width:600px;margin:0 auto;padding:10px 12px;display:flex;gap:6px;overflow-x:auto;scrollbar-width:none}
-nav div::-webkit-scrollbar{display:none}
-nav a{white-space:nowrap;color:var(--ink2);text-decoration:none;padding:7px 13px;border-radius:999px;font-size:14px;font-weight:600;background:var(--card)}
-nav a.on{background:var(--ink);color:var(--card)}
-.card,.hero{background:var(--card);border-radius:20px;padding:22px 20px;margin:12px 0;scroll-margin-top:60px}
-.hero{padding-top:26px}.hero small{color:var(--ink3);font-size:13px}.hero>span{display:block;margin-top:14px;color:var(--ink2);font-size:15px}
-.big{display:block;font-size:34px;font-weight:700;letter-spacing:-.02em;margin:2px 0 4px;font-variant-numeric:tabular-nums}
-.hero p{margin:0;color:var(--ink2);font-size:15px;font-weight:600}
-.chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:16px}.chips span{background:var(--fill);border-radius:10px;padding:6px 10px;font-size:13px;color:var(--ink2)}
-.chips b{color:var(--ink);font-weight:700}
-h2{font-size:20px;font-weight:700;margin:0 0 10px}h2 small{color:var(--accent);font-size:15px;font-weight:600;margin-left:4px}
-h3{font-size:15px;color:var(--ink2);margin:22px 0 4px}
-.up{color:var(--up)!important}.down{color:var(--down)!important}
-.lead{color:var(--ink3);font-size:14px;margin:-4px 0 6px}
-.row{border-radius:14px;margin:0 -8px}.row[open]{background:var(--fill)}
-.row summary{list-style:none;display:flex;align-items:center;gap:12px;padding:12px 8px;cursor:pointer;border-radius:14px}
-.row summary::-webkit-details-marker,.fold summary::-webkit-details-marker{display:none}
-.row summary:hover{background:var(--fill)}
-.av{flex:0 0 42px;height:42px;border-radius:50%;background:var(--fill);display:grid;place-items:center;font-size:11.5px;font-weight:700;
-color:var(--ink2);letter-spacing:-.03em;overflow:hidden}
-.row[open] .av{background:var(--card)}
-.rt{flex:1;min-width:0;display:flex;flex-direction:column}.rt b{font-size:16px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.rt small,.rr small{color:var(--ink3);font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.nm{color:var(--ink3);font-weight:400;font-size:13px;margin-left:2px}
-.rr{display:flex;flex-direction:column;align-items:flex-end;font-variant-numeric:tabular-nums}.rr b{font-size:16px;font-weight:600}
-.chev{width:8px;height:8px;border-right:2px solid var(--ink3);border-bottom:2px solid var(--ink3);transform:rotate(45deg);margin:0 4px 4px 2px;
-transition:transform .2s}details[open]>summary .chev{transform:rotate(-135deg);margin-bottom:-4px}
-.rb{padding:2px 12px 16px}
-em{font-style:normal;font-size:12px;font-weight:600;padding:2px 7px;border-radius:6px;background:var(--fill);color:var(--ink2);margin-right:4px}
-.row[open] em{background:var(--card)}em.good{background:var(--upbg);color:var(--up)}em.bad{background:var(--downbg);color:var(--down)}
-em.warn{background:var(--warnbg);color:var(--warn)}
-.kv{margin:8px 0 0;display:grid;gap:0}.kv div{display:flex;justify-content:space-between;gap:12px;padding:9px 0;border-bottom:1px solid var(--line)}
-.kv div:last-child{border:0}.kv dt{color:var(--ink2)}.kv dd{margin:0;font-weight:600;text-align:right;font-variant-numeric:tabular-nums}
-.kv small{color:var(--ink3);font-weight:400;font-size:13px}
-.row[open] .kv div{border-color:color-mix(in srgb,var(--ink3) 18%,transparent)}
-.hint,.desc{color:var(--ink2);font-size:14px;margin:12px 0 0}.desc{margin:0 0 4px}
-code{background:var(--card);padding:1px 6px;border-radius:6px;font-size:13px;white-space:nowrap}
-.doc{margin-top:10px;display:flex;flex-direction:column;gap:10px}
-.callout{background:var(--downbg);color:var(--ink);border-radius:16px;padding:16px 18px;font-size:18px;font-weight:700;line-height:1.45;
-letter-spacing:-.02em}
-.picks{list-style:none;margin:0;padding:0;background:var(--fill);border-radius:16px;padding:4px 14px}
-.picks li{display:flex;gap:12px;align-items:flex-start;padding:12px 0;border-bottom:1px solid color-mix(in srgb,var(--ink3) 18%,transparent)}
-.picks li:last-child{border:0}.picks .av{background:var(--card)}.picks .rt b{font-size:16px;white-space:normal}
-.picks .why{color:var(--ink2);font-size:14.5px;line-height:1.55;margin-top:2px}
-em.d-go{background:var(--upbg);color:var(--up)}em.d-hold{background:var(--warnbg);color:var(--warn)}em.d-watch{background:var(--card)}
-.sec{background:var(--fill);border-radius:16px;padding:14px 16px}
-.sh{display:flex;align-items:center;gap:8px;font-weight:700;font-size:16px;margin-bottom:6px}
-.si{width:30px;height:30px;border-radius:10px;background:var(--card);display:grid;place-items:center;font-size:16px}
-.sec ul{list-style:none;margin:0;padding:0}.sec li{position:relative;padding:7px 0 7px 14px;color:var(--ink);font-size:15px;line-height:1.6;
-word-break:keep-all;overflow-wrap:anywhere}
-.sec li::before{content:"";position:absolute;left:2px;top:16px;width:4px;height:4px;border-radius:50%;background:var(--ink3)}
-.sec li+li{border-top:1px solid color-mix(in srgb,var(--ink3) 14%,transparent)}
-.src{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:13px}.src span{color:var(--ink3);margin-right:2px}
-.src a{background:var(--fill);color:var(--ink2);text-decoration:none;padding:5px 10px;border-radius:999px;max-width:100%;
-overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.chart{position:relative;height:170px;margin:4px 0 6px;touch-action:pan-y}.chart svg{display:block;width:100%;height:100%;overflow:visible}
-.chart .ln{fill:none;stroke-width:2;stroke-linejoin:round;stroke-linecap:round}
-.chart .ref{stroke:var(--ink3);stroke-width:1;stroke-dasharray:4 4}.chart .reflbl{fill:var(--ink3);font-size:11px}
-.chart .cross{stroke:var(--ink3);stroke-width:1}.chart .dot{stroke:var(--card);stroke-width:2}
-.tip{position:absolute;top:-6px;transform:translateX(-50%);background:var(--ink);color:var(--card);font-size:12px;font-weight:600;
-padding:4px 8px;border-radius:8px;white-space:nowrap;pointer-events:none;font-variant-numeric:tabular-nums}
-.empty{display:flex;flex-direction:column;align-items:center;gap:6px;padding:22px 8px;color:var(--ink3);text-align:center;font-size:14px}
-.empty span{font-size:30px}
-.alert{background:var(--warnbg);color:var(--warn);border-radius:14px;padding:12px 14px;margin:10px 0;font-size:14px;font-weight:500}
-.tabs{display:flex;gap:6px;overflow-x:auto;margin:0 0 10px;scrollbar-width:none}
-.tab{border:0;background:var(--fill);color:var(--ink2);font:inherit;font-size:14px;font-weight:600;padding:7px 13px;border-radius:999px;cursor:pointer;white-space:nowrap}
-.tab.on{background:var(--ink);color:var(--card)}.pane{display:none}.pane.on{display:block}
-.when{color:var(--ink3);font-size:13px}
-.report{white-space:pre-wrap;word-break:keep-all;overflow-wrap:anywhere;font-size:15px;line-height:1.7;margin-top:6px;color:var(--ink)}
-.report b{font-weight:700}.report a{color:var(--accent)}.report .li{display:block;padding-left:14px;text-indent:-10px}
-.report .li::before{content:"·";color:var(--ink3);margin-right:6px}
-.plain{list-style:none;margin:0;padding:0}.plain li{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 0}
-.plain li>span{display:flex;align-items:center;gap:12px;min-width:0}.plain li b{font-variant-numeric:tabular-nums}
-.plain li.note{display:block;border-bottom:1px solid var(--line);padding:12px 0}.plain li.note:last-child{border:0}
-.plain li.note small{display:block;color:var(--ink3);font-size:13px;margin-top:3px}
-.fold{border-top:1px solid var(--line)}.fold:first-of-type{border:0}
-.fold summary{list-style:none;display:flex;align-items:center;padding:14px 0;font-weight:600;cursor:pointer;font-size:16px}
-.fold summary small{color:var(--ink3);font-weight:400;font-size:13px;margin-left:8px}.fold summary .chev{margin-left:auto}
-footer{text-align:center;color:var(--ink3);font-size:12px;padding:8px 16px 32px}
-</style></head><body>
-<nav><div>{{nav}}</div></nav>
-<div class="wrap">{{hero}}{{body}}</div>
-<footer>보기 전용 · 기록과 승인은 슬랙에서 · 투자 판단과 주문은 직접 하세요</footer>
-<script>
-(function(){
-var NS="http://www.w3.org/2000/svg";
-function el(t,a){var e=document.createElementNS(NS,t);for(var k in a)e.setAttribute(k,a[k]);return e}
-function fmt(v){return "$"+v.toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2})}
-function draw(box){
-  if(box.dataset.done||!box.offsetWidth)return;box.dataset.done=1;
-  var D=JSON.parse(box.dataset.chart),c=D.c,W=box.offsetWidth,H=box.offsetHeight,pad=6,lab=64;
-  var vals=c.slice();if(D.stop)vals.push(D.stop);if(D.avg)vals.push(D.avg);
-  var lo=Math.min.apply(null,vals),hi=Math.max.apply(null,vals),sp=(hi-lo)||1;lo-=sp*.06;hi+=sp*.06;sp=hi-lo;
-  var X=function(i){return pad+i/(c.length-1)*(W-pad*2-lab)},Y=function(v){return pad+(hi-v)/sp*(H-pad*2)};
-  var col=getComputedStyle(document.documentElement).getPropertyValue(c[c.length-1]>=c[0]?"--up":"--down").trim();
-  var svg=el("svg",{viewBox:"0 0 "+W+" "+H,role:"img","aria-label":"최근 "+c.length+"일 종가, 마지막 "+fmt(c[c.length-1])});
-  [["stop","손절 "],["avg","평단 "]].forEach(function(r){var v=D[r[0]];if(!v)return;
-    svg.appendChild(el("line",{x1:pad,x2:W-pad-lab+4,y1:Y(v),y2:Y(v),"class":"ref"}));
-    var t=el("text",{x:W-pad-lab+8,y:Y(v)+4,"class":"reflbl"});t.textContent=r[1]+fmt(v);svg.appendChild(t)});
-  var d=c.map(function(v,i){return(i?"L":"M")+X(i).toFixed(1)+" "+Y(v).toFixed(1)}).join("");
-  svg.appendChild(el("path",{d:d,"class":"ln",stroke:col}));
-  var lx=X(c.length-1),ly=Y(c[c.length-1]);
-  var end=el("circle",{cx:lx,cy:ly,r:4,fill:col,"class":"dot"});svg.appendChild(end);
-  var cross=el("line",{y1:0,y2:H,"class":"cross",visibility:"hidden"}),dot=el("circle",{r:5,fill:col,"class":"dot",visibility:"hidden"});
-  svg.appendChild(cross);svg.appendChild(dot);box.appendChild(svg);
-  var tip=document.createElement("div");tip.className="tip";tip.style.display="none";box.appendChild(tip);
-  function show(e){var r=box.getBoundingClientRect(),x=e.clientX-r.left;
-    var i=Math.round((x-pad)/(W-pad*2-lab)*(c.length-1));i=Math.max(0,Math.min(c.length-1,i));
-    var px=X(i);cross.setAttribute("x1",px);cross.setAttribute("x2",px);dot.setAttribute("cx",px);dot.setAttribute("cy",Y(c[i]));
-    cross.setAttribute("visibility","visible");dot.setAttribute("visibility","visible");
-    var p=D.d[i].slice(5).replace("-","/");tip.textContent=p+"  "+fmt(c[i]);tip.style.display="block";
-    tip.style.left=Math.max(50,Math.min(W-50,px))+"px"}
-  function hide(){cross.setAttribute("visibility","hidden");dot.setAttribute("visibility","hidden");tip.style.display="none"}
-  box.addEventListener("pointermove",show);box.addEventListener("pointerdown",show);box.addEventListener("pointerleave",hide);
-}
-function all(){document.querySelectorAll(".chart").forEach(draw)}
-document.querySelectorAll("details").forEach(function(d){d.addEventListener("toggle",all)});
-all();
-document.querySelectorAll(".tab").forEach(function(b){b.addEventListener("click",function(){
-  document.querySelectorAll(".tab,.pane").forEach(function(x){x.classList.remove("on")});
-  b.classList.add("on");document.getElementById(b.dataset.tab).classList.add("on")})});
-var links=[].slice.call(document.querySelectorAll("nav a"));
-function spy(){var y=window.scrollY+90,cur=links[0];links.forEach(function(a){var s=document.querySelector(a.getAttribute("href"));
-  if(s&&s.offsetTop<=y)cur=a});links.forEach(function(a){a.classList.toggle("on",a===cur)})}
-window.addEventListener("scroll",spy,{passive:true});spy();
-})();
-</script>
-</body></html>"""
+def stock(c: Ctx, code: str) -> tuple[str, str, list[str]]:
+    code = code.upper()
+    if not re.fullmatch(r"[A-Z0-9.\-^=]{1,12}", code):
+        raise NotFound
+    q = Q.get([code]).get(code)
+    cur = "KRW" if Q.is_kr(code) else "USD"
+    hold = next((x for x in c.holdings() if x["code"] == code), None)
+    name = (hold or {}).get("name") or (q or {}).get("name") or c.name(code)
+    pts = c.series(code, 250)
+    if not (q or pts):
+        raise NotFound
+    out = [f'<section class="hero"><small>{h(code)} · {"한국" if cur == "KRW" else "미국"}</small>'
+           f'<span class="lbl">{h(name)}</span><div class="quote"><b class="big">{live(code, "price", q, cur)}</b>'
+           f'<span class="chg">{live(code, "chg", q, cur)}</span>{market_state(q)}</div></section>']
+    lines: dict[str, float | None] = {}
+    if hold:
+        lines["avg"] = hold["avg_price"]
+    rec = c.db.query("SELECT * FROM recommendations WHERE code=? ORDER BY date DESC LIMIT 1", (code,))
+    if rec and rec[0]["stop"]:
+        lines["stop"] = rec[0]["stop"]
+    if pts:
+        out.append(card("최근 1년", chart(pts, cur, lines, 220)))
+    if hold:
+        out.append(card("내가 가진 만큼", kv([
+            ("수량", shares(hold["qty"])), ("평균 산 가격", money(hold["avg_price"], cur)),
+            ("평가금액", live(code, "val", q, cur, hold["qty"])), ("손익", live(code, "pnl", q, cur, hold["qty"], hold["avg_price"])),
+            ("산 금액", money(hold["avg_price"] * hold["qty"], cur))])))
+    if rec:
+        r = rec[0]
+        out.append(card("시스템 추천", kv([
+            ("추천일", h(r["date"])), ("고른 이유", f'<a href="/strategy/{h(r["strategy"])}"><b>{h(LB.strat(r["strategy"]))} ›</b></a>'),
+            ("기준가", money(r["entry_ref"], cur)), ("기준가 대비", live(code, "vs", q, cur, ref=r["entry_ref"])),
+            ("손절가", money(r["stop"], cur)), ("목표가", money(r["target"], cur) if r["target"] else "없음")])))
+    sigs = c.db.query("SELECT strategy, MAX(date) d FROM signals WHERE code=? GROUP BY strategy ORDER BY d DESC LIMIT 8", (code,))
+    if sigs:
+        out.append(card("신호가 나온 전략", "".join(
+            link_row(f"/strategy/{x['strategy']}", avatar(LB.strat(x["strategy"])[:2]), h(LB.strat(x["strategy"])),
+                     f"{h(x['d'])} 신호", "") for x in sigs)))
+    return name, "".join(out), [code]
 
 
+def reports(c: Ctx, tab: str) -> tuple[str, str, list[str]]:
+    out = [chips([("/reports", "리포트", tab == "list"), ("/reports?t=learn", "학습 일지", tab == "learn"),
+                  ("/reports?t=props", "승인 대기", tab == "props"), ("/reports?t=edge", "엣지 맵", tab == "edge")])]
+    if tab == "learn":
+        status_ko = {"open": ("확인 중", ""), "confirmed": ("맞았음", "good"), "rejected": ("틀렸음", "bad")}
+        ins = c.db.query("SELECT * FROM insights ORDER BY id DESC LIMIT 50")
+        lst = "".join(f'<li class="note"><em class="{status_ko.get(i["status"], ("", ""))[1]}">'
+                      f'{status_ko.get(i["status"], (i["status"], ""))[0]}</em> {h(i["text"])}'
+                      + (f'<small>→ {h(i["note"])}</small>' if i["note"] else "") + f'<small>{h(kst(i["ts"]))}</small></li>'
+                      for i in ins)
+        out.append(card("학습 일지", f'<ul class="plain">{lst}</ul>' if ins else empty("📒", "시스템이 배운 것이 아직 없어요.")))
+    elif tab == "props":
+        props = c.db.query("SELECT * FROM proposals WHERE status='pending' ORDER BY id")
+        lst = "".join(f'<li class="note"><b>#{p["id"]} {h(p["title"])}</b><small>{h((p["rationale"] or "")[:500])}</small>'
+                      f'<small>슬랙에서 <code>approve {p["id"]}</code> 또는 <code>reject {p["id"]}</code></small></li>' for p in props)
+        out.append(card("승인 대기 제안", f'<ul class="plain">{lst}</ul>' if props else empty("✅", "승인할 제안이 없어요.")))
+    elif tab == "edge":
+        edge = c.db.get("edge_summary")
+        out.append(card("엣지 맵", doc_html(DF.parse_text(edge)) if edge else empty("🗺️", "토요일 주간 학습 뒤에 생겨요.")))
+    else:
+        rs = c.db.query("SELECT * FROM reports ORDER BY id DESC LIMIT 40")
+        if rs:
+            top = rs[0]
+            icon, label = KIND.get(top["kind"], ("📄", top["kind"]))
+            data = report_doc(top)
+            out.append(card(f"{icon} {label}", f'<p class="lead">{h(kst(top["ts"]))} 작성</p>' + doc_html(data["doc"], data.get("learned"))))
+            lst = ""
+            for r in rs[1:]:
+                icon, label = KIND.get(r["kind"], ("📄", r["kind"]))
+                d = report_doc(r)["doc"]
+                head = d.get("headline") or next((s["title"] for s in d.get("sections", []) if s.get("title")), "")
+                lst += link_row(f"/report/{r['id']}", avatar(icon), h(label), h(head[:40]), "", h(kst(r["ts"], "%-m/%-d %H:%M")))
+            if lst:
+                out.append(card("지난 리포트", lst))
+        else:
+            out.append(card("리포트", empty("📰", "아직 리포트가 없어요. 장이 열리는 날 아침·저녁에 생겨요.")))
+    return "리포트", "".join(out), []
+
+
+def report(c: Ctx, rid: str) -> tuple[str, str, list[str]]:
+    if not rid.isdigit():
+        raise NotFound
+    r = c.db.query("SELECT * FROM reports WHERE id=?", (int(rid),))
+    if not r:
+        raise NotFound
+    icon, label = KIND.get(r[0]["kind"], ("📄", r[0]["kind"]))
+    data = report_doc(r[0])
+    return label, card(f"{icon} {label}", f'<p class="lead">{h(kst(r[0]["ts"]))} 작성</p>' + doc_html(data["doc"], data.get("learned"))), []
+
+
+def route(cfg: Config, db: DB, path: str, query: dict) -> str:
+    c = Ctx(cfg, db)
+    parts = [unquote(p) for p in path.strip("/").split("/") if p]
+    tab, back = "/", None
+    if not parts:
+        title, body, codes = home(c)
+    elif parts == ["assets"]:
+        (title, body, codes), tab = assets(c), "/assets"
+    elif parts == ["picks"]:
+        (title, body, codes), tab = picks(c), "/picks"
+    elif parts == ["strategies"]:
+        (title, body, codes), tab = strategies(c), "/strategies"
+    elif len(parts) == 2 and parts[0] == "strategy":
+        (title, body, codes), tab, back = strategy(c, parts[1]), "/strategies", "/strategies"
+    elif len(parts) == 2 and parts[0] == "stock":
+        (title, body, codes), tab, back = stock(c, parts[1]), "", "javascript:history.back()"
+    elif parts == ["reports"]:
+        (title, body, codes), tab = reports(c, (query.get("t") or ["list"])[0]), "/reports"
+    elif len(parts) == 2 and parts[0] == "report":
+        (title, body, codes), tab, back = report(c, parts[1]), "/reports", "/reports"
+    else:
+        raise NotFound
+    return page(title, body, tab, back, codes)
+
+
+# ---------------------------------------------------------------------------- server
 class Handler(BaseHTTPRequestHandler):
     cfg: Config
     user = "me"
     password: str | None = None
 
-    def log_message(self, fmt, *args):  # quiet; errors still go to the log below
+    def log_message(self, fmt, *args):
         pass
 
     def _authorized(self) -> bool:
@@ -485,7 +476,8 @@ class Handler(BaseHTTPRequestHandler):
         return hmac.compare_digest(got.encode(), want.encode())
 
     def do_GET(self):
-        if self.path == "/healthz":
+        url = urlparse(self.path)
+        if url.path == "/healthz":
             return self._send(200, "ok", "text/plain")
         if not self._authorized():
             self.send_response(401)
@@ -493,18 +485,23 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", "0")
             self.end_headers()
             return
-        if self.path.split("?")[0] != "/":
-            return self._send(404, "not found", "text/plain")
+        query = parse_qs(url.query)
+        if url.path == "/api/quotes":
+            codes = [x for x in (query.get("c") or [""])[0].split(",") if re.fullmatch(r"[A-Za-z0-9.\-^=]{1,12}", x)][:60]
+            return self._send(200, json.dumps(Q.get(codes)), "application/json")
         try:
             db = ReadOnlyDB(self.cfg.path("db_path"))
             try:
-                html = render(self.cfg, db)
+                html = route(self.cfg, db, url.path, query)
             finally:
                 db.conn.close()
             self._send(200, html, "text/html; charset=utf-8")
+        except NotFound:
+            self._send(404, page("없는 페이지", card("없는 페이지", empty("🤔", "찾는 페이지가 없어요.")), "", "/"),
+                       "text/html; charset=utf-8")
         except Exception:
-            log.exception("render failed")
-            self._send(500, "대시보드를 그리지 못했어요. 서버 로그를 확인하세요.", "text/plain; charset=utf-8")
+            log.exception("render failed: %s", self.path)
+            self._send(500, "페이지를 그리지 못했어요. 서버 로그를 확인하세요.", "text/plain; charset=utf-8")
 
     def _send(self, code: int, text: str, ctype: str):
         data = text.encode("utf-8")

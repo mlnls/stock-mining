@@ -28,7 +28,10 @@ HELP = """명령어 (코드 = 티커, 예: NVDA). Slack에서는 봇 DM에 '/' �
 /insights                   학습 일지 (관찰·가설·교훈과 검증 결과)
 /edge                       엣지 맵 (전략별로 돈이 벌리고 잃는 조건)
 /report                     최근 리포트 다시 보기
-/ask 질문                   Claude에게 질문 (웹 검색 포함)"""
+/ask 질문                   Claude에게 질문 (웹 검색 포함)
+/hold                       내 자산(장기 보유) 목록
+/hold 코드 수량 평단         내 자산 등록·수정 (예: hold 379800 19 23965)
+/hold rm 코드               내 자산 삭제"""
 
 
 def _code(s: str, app: App) -> str | None:
@@ -127,6 +130,22 @@ def handle(app: App, text: str) -> str:
         if cmd == "/report":
             r = app.db.query("SELECT * FROM reports WHERE kind IN ('evening','morning','weekly') ORDER BY id DESC LIMIT 1")
             return r[0]["body"] if r else "리포트 없음"
+        if cmd == "/hold":
+            if not args:
+                rows = app.db.query("SELECT * FROM holdings ORDER BY market, code")
+                return "\n".join(f"{r['name'] or r['code']}({r['code']}) {r['qty']:g}주 평단 {r['avg_price']:,.2f}"
+                                 for r in rows) or "등록된 자산 없음. 예: hold 379800 19 23965"
+            if args[0] in ("rm", "del", "삭제") and len(args) > 1:
+                app.db.execute("DELETE FROM holdings WHERE code=?", (args[1].upper(),))
+                return f"삭제: {args[1].upper()}"
+            if len(args) < 3:
+                return "형식: hold 코드 수량 평단  (삭제: hold rm 코드)"
+            code = args[0].upper()
+            from . import quotes as Q
+            name = (Q.get([code]).get(code) or {}).get("name") if Q.is_kr(code) else None
+            app.db.set_holding(code, float(args[1].replace(",", "")), float(args[2].replace(",", "").lstrip("$")),
+                               name, app.now().isoformat(timespec="seconds"))
+            return f"저장: {name or code} {float(args[1]):g}주 평단 {float(args[2].replace(',', '')):,.2f}"
         if cmd == "/ask":
             if not app.claude_ready:
                 return "Claude 미설정 (Claude Code + CLAUDE_CODE_OAUTH_TOKEN 또는 ANTHROPIC_API_KEY 필요)"
