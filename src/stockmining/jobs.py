@@ -150,7 +150,9 @@ class App:
             n = D.update_prices(self.db, self.cfg.raw, codes[:limit] if limit else codes)
             log.info("downloaded %d rows", n)
         D.refresh_universe(self.db, self.cfg.raw)
-        self.backtest_all()
+        ctx = self.full_context()
+        self.backtest_all(ctx)
+        self.replay(ctx)
 
     def backtest_all(self, ctx=None) -> dict:
         ctx = ctx or self.full_context()
