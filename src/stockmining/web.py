@@ -135,6 +135,16 @@ def report_doc(r: dict) -> str:
     return doc_html(DF.parse_text(r["body"]))
 
 
+def kst(ts: str) -> str:
+    """Stored timestamps are in the market's timezone; show them in Korean time."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    try:
+        return datetime.fromisoformat(ts).astimezone(ZoneInfo("Asia/Seoul")).strftime("%-m월 %-d일 %H:%M")
+    except ValueError:
+        return ts[:16].replace("T", " ")
+
+
 STATUS = {"active": "사용 중", "muted": "쉬는 중", "retired": "퇴역"}
 
 
@@ -237,7 +247,7 @@ def render(cfg: Config, db: DB) -> str:
         first = not tabs
         tabs += f'<button class="tab{" on" if first else ""}" data-tab="rep-{k}">{label}</button>'
         panes += (f'<div class="pane{" on" if first else ""}" id="rep-{k}"><small class="when">'
-                  f'{h(r[0]["ts"][:16].replace("T", " "))} 작성</small>{report_doc(r[0])}</div>')
+                  f'{h(kst(r[0]["ts"]))} 작성 (한국 시간)</small>{report_doc(r[0])}</div>')
     rep_html = (f'<div class="tabs">{tabs}</div>{panes}' if tabs
                 else empty("📰", "아직 리포트가 없어요. 장이 열리는 날 아침·저녁에 생겨요."))
 
