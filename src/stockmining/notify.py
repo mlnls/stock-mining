@@ -16,6 +16,16 @@ log = logging.getLogger(__name__)
 LIMIT = 3900  # Telegram max is 4096; Slack recommends ≤ 4,000 chars per message
 
 
+def to_mrkdwn(text: str) -> str:
+    """Markdown → Slack mrkdwn: headings/bold → *bold*, [t](u) → <u|t>, '- ' bullets → '• '."""
+    import re
+    text = re.sub(r"\[([^\]]+)\]\((https?://[^)\s]+)\)", r"<\2|\1>", text)
+    text = re.sub(r"\*\*(.+?)\*\*", r"*\1*", text)
+    text = re.sub(r"(?m)^#{1,6}\s*(.+?)\s*$", r"*\1*", text)
+    text = re.sub(r"(?m)^(\s*)[-*]\s+", r"\1• ", text)
+    return text
+
+
 def split(text: str, limit: int = LIMIT) -> list[str]:
     chunks, cur = [], ""
     for line in text.splitlines(keepends=True):
@@ -130,7 +140,7 @@ class Slack:
         if not self.enabled:
             print(text)
             return
-        for chunk in split(text):
+        for chunk in split(to_mrkdwn(text)):
             try:
                 self.web.chat_postMessage(channel=channel or self.dm_channel(), text=chunk, unfurl_links=False,
                                           unfurl_media=False)

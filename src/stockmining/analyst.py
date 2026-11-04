@@ -16,6 +16,7 @@ from pathlib import Path
 
 import anthropic
 
+from . import labels as LB
 from . import features as F
 from . import rules as R
 
@@ -37,7 +38,13 @@ SYSTEM_BASE = """당신은 {market} 스윙 트레이딩 시스템의 분석가�
 - 과최적화를 경계합니다. 표본이 적은(30건 미만) 성과는 '아직 판단 불가'로 다룹니다.
 - 원칙 수정은 '제안'만 합니다. 제안은 백테스트 게이트와 사용자 승인을 거쳐야 반영됩니다.
 - 수익을 보장하거나 확신하는 표현을 쓰지 않습니다. 손실 가능성과 손절 원칙을 항상 우선합니다.
-- 메신저(Slack)로 읽히므로 짧은 문단과 글머리표로, 마크다운 표 없이 한국어로 씁니다."""
+
+쓰는 방식 (사용자는 주식 초보입니다. 슬랙 폰 화면에서 10초 안에 읽혀야 합니다)
+- 쉬운 한국어로 짧게. 한 줄에 한 가지만. 글머리표는 "• "만 쓰고, 제목(#)·굵게(**)·표·코드블록은 쓰지 않습니다.
+- 전문 용어를 쓰지 않습니다: PF·기대값·가중치·표본 외·국면·페이퍼·블랙아웃·ATR·DSL 대신
+  "이 방식이 과거에 벌었는지", "가상 매매", "실적 발표 직전" 같은 말로 풉니다.
+- 전략은 영어 이름 대신 한글 이름으로 부릅니다: {strategy_names}
+- 숫자는 꼭 필요한 것만, 한 문장에 하나. 데이터로 확인 못 한 내용은 길게 설명하지 말고 "확인 못 함" 한 마디로 끝냅니다."""
 
 DSL_DOC = f"""규칙 명세(JSON) 형식:
 {R.__doc__}
@@ -144,7 +151,8 @@ def _call(cfg, system: str, user: str, effort: str, *, web: bool = False, schema
 
 
 def _system(cfg, principles: str) -> str:
-    base = SYSTEM_BASE.format(market=MARKET_DESC[cfg.get("market", "us")])
+    names = ", ".join(f"{k}={v}" for k, v in LB.STRATEGY_KO.items())
+    base = SYSTEM_BASE.format(market=MARKET_DESC[cfg.get("market", "us")], strategy_names=names)
     return f"{base}\n\n<principles>\n{principles}\n</principles>"
 
 
@@ -211,12 +219,12 @@ def evening_report(cfg, principles: str, ctx: dict) -> dict:
 </data>
 
 다음을 작성하세요.
-1. report: 메신저용 저녁 리포트(1,500자 이내).
-   - 시장 국면 한 줄
-   - 내일 매수 후보(recommendations)마다: 근거 전략, 진입 기준가·손절가·목표가·수량, 주의할 점
-   - 보유 포지션 경고(alerts)와 대응 원칙
-   - 최근 매매일지의 원칙 위반 지적(discipline) — 예: "최근 10건 중 손절 미준수 4건"
-   - 전략별 학습 현황 요약(어떤 전략이 현재 국면에서 통하고/안 통하는지, 음소거 변화)
+1. report: 짧은 코멘트(400자 이내, "• " 글머리표 2~4줄).
+   후보 종목의 가격·손절가·수량·금액은 시스템이 카드로 따로 보여 주므로 숫자를 반복하지 마세요. 대신:
+   • 후보마다 왜 골랐는지와 조심할 점을 한 줄씩 (없으면 "오늘은 쉬는 날" 한 줄)
+   • 시장 분위기 한 줄 (예: "최근 한 달 나스닥이 8% 빠져 흔들리는 중")
+   • 내 매매 습관 지적은 위반(discipline)이 있을 때만 — 예: "최근 10번 중 4번 손절을 늦게 했어요"
+   • 보유 종목 경고(alerts)가 있으면 무엇을 해야 하는지 한 줄
 2. proposals: 데이터가 뒷받침할 때만 0~2개. 근거가 약하면 빈 배열.
    - kind=principle: principle_text에 원칙.md에 추가할 한두 문장, rule_spec_json은 빈 문자열.
    - kind=rule: rule_spec_json에 아래 형식의 새 규칙 JSON 문자열(백테스트로 검증됨), principle_text는 빈 문자열.
@@ -255,7 +263,13 @@ def morning_briefing(cfg, principles: str, ctx: dict) -> dict:
 {_dump(ctx)}
 </data>
 
-포함할 내용(1,500자 이내):
+포함할 내용 — 600자 이내, "• " 글머리표만, 아래 순서로:
+1) 첫 줄: 오늘의 결론 한 줄 (예: "REPL은 계획대로 진행해도 돼요" / "오늘 살 후보 없음")
+2) 후보·보유 종목마다 한 줄: 진행 또는 보류 + 이유 (뉴스·공시·5거래일 안의 실적 발표)
+3) 시장 분위기 2줄 이내 (선물·금리·유가 등 확인된 것만)
+4) 오늘 조심할 일정 1줄
+5) 마지막 줄: 한국 시간 개장·마감 시각
+조사 항목 참고:
 {MORNING_ITEMS[market]}
 
 마지막 줄에 반드시 다음 형식의 JSON 한 줄을 붙이세요(보류 권고 종목코드와 이유):

@@ -18,6 +18,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from . import journal as J
+from . import labels as LB
 from .config import Config
 from .db import DB
 
@@ -91,7 +92,6 @@ def table(head: list[str], rows: list[list[str]], empty: str, num_cols: set[int]
     return f'<div class="tw"><table><thead><tr>{th}</tr></thead><tbody>{body}</tbody></table></div>'
 
 
-REGIME = {"bull": "상승장", "neutral": "중립", "bear": "하락장"}
 STATUS = {"active": "사용 중", "muted": "음소거", "retired": "퇴역"}
 
 
@@ -109,8 +109,8 @@ def render(cfg: Config, db: DB) -> str:
     acct = cfg["account"]
     facts = [
         ("데이터 기준일", h(last_day or "-")),
-        ("시장 국면", f'{h(REGIME.get(market.get("regime"), market.get("regime") or "-"))}'
-                    f'<small>{h(cfg["regime_index"])} {num(market.get("close"))} · 20일 {pct(market.get("chg_20d_pct"))}</small>'),
+        ("시장 국면", f'{h(LB.regime(market.get("regime")))}'
+                    f'<small>{h("S&P500" if us else cfg["regime_index"])} 최근 한 달 {pct(market.get("chg_20d_pct"))}</small>'),
         ("운용 자금", money(acct.get("capital"), us)),
         ("투자 성향", h({"aggressive": "공격형", "normal": "기본형"}.get(cfg["profile"], cfg["profile"]))),
     ]
@@ -124,12 +124,12 @@ def render(cfg: Config, db: DB) -> str:
     for r in recs:
         risk = (r["entry_ref"] - r["stop"]) * r["shares"] if r["entry_ref"] and r["stop"] and r["shares"] else None
         rec_rows.append([
-            f'<b>{h(r["code"])}</b><small>{h(name(r["code"]))}</small>', h(r["strategy"]),
+            f'<b>{h(r["code"])}</b><small>{h(name(r["code"]))}</small>', h(LB.strat(r["strategy"])),
             sparkline(closes.get(r["code"], []), r["stop"]),
             money(r["entry_ref"], us), money(r["stop"], us), money(r["target"], us), h(r["shares"]),
             money(risk, us),
             f'<span class="tag warn">⛔ 보류</span> {h(r["flagged"])}' if r["flagged"] else '<span class="tag">후보</span>'])
-    recs_html = table(["종목", "전략", "최근 60일", "기준가", "손절", "목표", "수량", "최대 손실", "상태"], rec_rows,
+    recs_html = table(["종목", "고른 이유", "최근 60일", "살 가격", "손절가", "목표가", "수량", "틀리면 최대 손실", "상태"], rec_rows,
                       "아직 추천이 없어요. 첫 저녁 배치 후 채워집니다.", {3, 4, 5, 6, 7})
 
     # ---- positions & round trips
@@ -142,11 +142,11 @@ def render(cfg: Config, db: DB) -> str:
         money(p["avg_price"], us), money(p.get("last_close"), us),
         f'<span class="{pnl_cls(p.get("pnl_pct"))}">{pct(p.get("pnl_pct"), 2)}</span>',
         money(p["plan_stop"], us) if p["plan_stop"] else '<span class="tag warn">미설정</span>',
-        money(p["plan_target"], us), h(p["strategy"] or "-"), h(p["first_buy"])] for c, p in pos.items()]
+        money(p["plan_target"], us), h(LB.strat(p["strategy"])), h(p["first_buy"])] for c, p in pos.items()]
     pos_html = table(["종목", "최근 60일", "수량", "평단", "종가", "손익", "손절", "목표", "전략", "첫 매수"], pos_rows,
                      "보유 종목이 없어요. 슬랙에서 buy 티커 가격 수량 으로 기록하면 여기 나타나요.", {2, 3, 4, 5, 6, 7})
     trip_rows = [[h(t["sell_date"]), f'<b>{h(t["code"])}</b>', h(t["qty"]), money(t["buy"], us), money(t["sell"], us),
-                  f'<span class="{pnl_cls(t["ret_pct"])}">{pct(t["ret_pct"], 2)}</span>', h(t["strategy"] or "-"),
+                  f'<span class="{pnl_cls(t["ret_pct"])}">{pct(t["ret_pct"], 2)}</span>', h(LB.strat(t["strategy"])),
                   h(t["sell_note"] or "")] for t in reversed(trips[-20:])]
     trips_html = table(["매도일", "종목", "수량", "매수가", "매도가", "수익률", "전략", "메모"], trip_rows,
                        "완료된 매매가 아직 없어요.", {2, 3, 4, 5})
@@ -161,29 +161,38 @@ def render(cfg: Config, db: DB) -> str:
                      "WHERE strategy=? AND status='closed'", (s["name"],))[0]
         po = db.query("SELECT COUNT(*) n FROM paper_trades WHERE strategy=? AND status IN ('open','pending')",
                       (s["name"],))[0]["n"]
-        pf = f.get("profit_factor")
+        pf, opf = f.get("profit_factor"), o.get("profit_factor")
+        if pf and pf >= 1.2 and (opf or 0) >= 1.1:
+            verdict = '<span class="tag good">👍 좋음</span>'
+        elif pf and pf >= 1.0:
+            verdict = '<span class="tag">보통</span>'
+        elif pf:
+            verdict = '<span class="tag bad">👎 안 좋음</span>'
+        else:
+            verdict = "-"
         strat_rows.append([
-            f'<b>{h(s["name"])}</b><small>{h((s["spec"].get("description") or "").strip()[:90])}</small>',
-            f'<span class="tag {"" if s["status"] == "active" else "mute"}">{h(STATUS.get(s["status"], s["status"]))}</span>',
-            pct(weights[s["name"]] * 100, 0, False) if s["name"] in weights else "-",
-            h(f.get("trades", "-")), pct(f.get("win_rate"), 0, False),
+            f'<b>{h(LB.strat(s["name"]))}</b><small>{h((s["spec"].get("description") or "").strip()[:80])}</small>',
+            verdict,
             f'<span class="{pnl_cls(f.get("expectancy_pct"))}">{pct(f.get("expectancy_pct"), 2)}</span>',
-            f'<span class="{"up" if pf and pf > 1 else "down" if pf else ""}">{num(pf)}</span>',
-            num(o.get("profit_factor")), pct(f.get("cagr_pct"), 0), pct(f.get("mdd_pct"), 0, False),
-            f'{p["n"]}건 · <span class="{pnl_cls(p["a"])}">{pct(p["a"], 2)}</span>' + (f'<small>진행 {po}</small>' if po else ""),
+            pct(f.get("win_rate"), 0, False),
+            f'<span class="{pnl_cls(o.get("expectancy_pct"))}">{pct(o.get("expectancy_pct"), 2)}</span>',
+            pct(f.get("mdd_pct"), 0, False),
+            f'{p["n"]}번 · <span class="{pnl_cls(p["a"])}">{pct(p["a"], 2)}</span>' + (f'<small>진행 중 {po}</small>' if po else ""),
+            f'<span class="tag {"" if s["status"] == "active" else "mute"}">{h(STATUS.get(s["status"], s["status"]))}</span>'
+            + (f'<small>비중 {weights[s["name"]]:.0%}</small>' if weights.get(s["name"]) else ""),
         ])
-    strat_html = table(["전략", "상태", "비중", "거래", "승률", "거래당", "PF", "최근 PF", "연수익", "최대 낙폭", "페이퍼"],
-                       strat_rows, "전략이 없어요.", {2, 3, 4, 5, 6, 7, 8, 9})
+    strat_html = table(["전략", "과거 성적", "한 번 거래 평균", "이긴 비율", "최근 성적", "최악 하락", "가상 매매", "상태"],
+                       strat_rows, "전략이 없어요.", {2, 3, 4, 5})
 
     # ---- paper trades
     paper = db.query("SELECT * FROM paper_trades WHERE status IN ('open','pending') ORDER BY signal_date DESC LIMIT 30")
     paper_closed = db.query("SELECT * FROM paper_trades WHERE status='closed' ORDER BY exit_date DESC LIMIT 30")
-    paper_rows = [[h(p["signal_date"]), f'<b>{h(p["code"])}</b>', h(p["strategy"]),
+    paper_rows = [[h(p["signal_date"]), f'<b>{h(p["code"])}</b>', h(LB.strat(p["strategy"])),
                    h("대기" if p["status"] == "pending" else "보유"), money(p["entry_price"], us), money(p["stop"], us),
                    money(p["target"], us)] for p in paper]
     paper_html = table(["신호일", "종목", "전략", "상태", "진입가", "손절", "목표"], paper_rows,
                        "진행 중인 가상 매매가 없어요.", {4, 5, 6})
-    pc_rows = [[h(p["exit_date"]), f'<b>{h(p["code"])}</b>', h(p["strategy"]), money(p["entry_price"], us),
+    pc_rows = [[h(p["exit_date"]), f'<b>{h(p["code"])}</b>', h(LB.strat(p["strategy"])), money(p["entry_price"], us),
                 money(p["exit_price"], us), f'<span class="{pnl_cls(p["ret_pct"])}">{pct(p["ret_pct"], 2)}</span>',
                 h(p["exit_reason"])] for p in paper_closed]
     pc_html = table(["청산일", "종목", "전략", "진입가", "청산가", "수익률", "사유"], pc_rows, "아직 청산된 가상 매매가 없어요.",
@@ -225,8 +234,8 @@ def render(cfg: Config, db: DB) -> str:
         ("recs", f"추천 종목 <small>{h(rdate or '')} 장 마감 기준 · 다음 거래일 매수 후보</small>", recs_html),
         ("pos", "보유 포지션", pos_html + "<h3>최근 완료 매매</h3>" + trips_html),
         ("reports", "리포트", rep_html),
-        ("strats", "전략 현황 <small>백테스트(전 기간) · 최근 PF = 표본 외 구간 · 페이퍼 = 실제 가상매매</small>", strat_html),
-        ("paper", "페이퍼 트레이딩", "<h3>진행 중</h3>" + paper_html + "<h3>최근 청산</h3>" + pc_html),
+        ("strats", "전략 성적표 <small>과거 5년 데이터로 시험한 결과 · 가상 매매 = 실제 돈 없이 매일 따라 해 본 결과</small>", strat_html),
+        ("paper", "가상 매매", "<h3>진행 중</h3>" + paper_html + "<h3>최근 청산</h3>" + pc_html),
         ("learn", "학습 일지", ins_html),
         ("props", "승인 대기 제안", prop_html),
         ("edge", "엣지 맵", edge_html),
@@ -266,7 +275,7 @@ tbody tr:hover{{background:color-mix(in srgb,var(--tag) 55%,transparent)}}
 td small{{display:block;color:var(--ink3);font-size:12px;white-space:normal;max-width:320px}}.n{{text-align:right}}
 .up{{color:var(--up)}}.down{{color:var(--down)}}
 .tag{{display:inline-block;font-size:12px;padding:1px 8px;border-radius:999px;background:var(--tag);color:var(--ink2)}}
-.tag.warn{{background:var(--warnbg);color:var(--warn)}}.tag.mute{{opacity:.7}}
+.tag.warn{{background:var(--warnbg);color:var(--warn)}}.tag.good{{color:var(--up)}}.tag.bad{{color:var(--down)}}.tag.mute{{opacity:.7}}
 .empty{{color:var(--ink3);margin:6px 0}}.alert{{background:var(--warnbg);color:var(--warn);border-radius:10px;padding:10px 12px;margin:10px 0 0}}
 .spark{{display:block}}.spark-line{{fill:none;stroke:var(--accent);stroke-width:2;stroke-linejoin:round;stroke-linecap:round}}
 .spark-dot{{fill:var(--accent);stroke:var(--card);stroke-width:2}}.spark-stop{{stroke:var(--ink3);stroke-width:1;stroke-dasharray:3 3}}

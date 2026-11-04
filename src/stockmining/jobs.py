@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import yaml
 
+from . import labels as LB
 from . import analyst as AI
 from . import backtest as BT
 from . import data as D
@@ -239,35 +240,61 @@ class App:
         }
         self.db.set("last_evening_ctx", json.dumps(ctx, ensure_ascii=False, default=str))
 
-        body = self._format_evening_fallback(ctx)
+        card = self._evening_card(ctx)
+        comment, extra = "", ""
         if self.claude_ready:
             try:
                 out = AI.evening_report(self.cfg.raw, self.principles(), ctx)
-                body = out["report"]
-                body += self._handle_ai_proposals(out.get("proposals", []))
+                comment = out["report"].strip()
+                extra += self._handle_ai_proposals(out.get("proposals", []))
                 learned = self.save_learning("evening", out)
                 if learned:
-                    body += "\n\n🧠 학습 일지\n" + "\n".join(learned)
+                    extra += f"\n\n🧠 시스템이 새로 배운 것 {len(learned)}개 · 대시보드 '학습 일지'에서 보기"
             except Exception as e:
                 log.error("claude evening failed: %s\n%s", e, traceback.format_exc())
-                body += f"\n\n(Claude 분석 실패: {e})"
+                comment = f"(Claude 코멘트 실패: {e})"
+        body = card + (f"\n\n💬 *코멘트*\n{comment}" if comment else "") + extra
         self.db.add_report("evening", body, self.now().isoformat(timespec="seconds"))
-        self.tg.send(f"📊 저녁 리포트 {day}\n\n{body}")
+        self.tg.send(body)
         return ctx
 
-    def _format_evening_fallback(self, ctx: dict) -> str:
+    def _evening_card(self, ctx: dict) -> str:
+        """Fixed-format summary the user reads first: what to buy, at what price, how much, worst case."""
+        cap = ctx["account"].get("capital") or 0
+        d = pd.Timestamp(ctx["date"])
+        recs = ctx["recommendations"] or []
+        lines = [f"📊 *저녁 리포트* · {d.month}/{d.day} 장 마감", ""]
+        if recs:
+            lines.append(f"✅ *내일 살 후보 {len(recs)}개*")
+        else:
+            lines.append("😴 *내일 살 종목 없음* — 쉬어 가는 날이에요")
+        for r in recs:
+            price, stop, sh = r["entry_ref_close"], r["stop"], r["shares"] or 0
+            cost = price * sh
+            drop = (stop / price - 1) * 100 if price and stop else None
+            lines += [
+                "",
+                f"*{r['code']}* {r['name'] or ''} · {LB.strat(r['strategy'])}",
+                f"• 살 가격  {self.fmt(price)} 근처 (지정가, 크게 갭상승하면 쫓아가지 않기)",
+                f"• 손절가  {self.fmt(stop)}" + (f"  ({abs(drop):.0f}% 빠지면 판다)" if drop is not None else ""),
+                "• 목표가  " + (self.fmt(r["target"]) if r["target"] else "없음 — 오르는 동안 들고 가며 손절가를 올림"),
+                f"• 수량  {round(sh, 2):g}주 ≈ {self.fmt(cost)}" + (f" (내 돈의 {cost / cap:.0%})" if cap else ""),
+                f"• 틀리면  최대 {self.fmt(r['risk_amount'])} 손실" + (f" (내 돈의 {r['risk_amount'] / cap:.0%})" if cap else ""),
+            ]
+            if r.get("next_earnings"):
+                lines.append(f"• 다음 실적 발표  {r['next_earnings']}")
+        for s_ in ctx.get("skipped_for_earnings", []):
+            lines.append(f"\n🚫 {s_['code']} 은 뺐어요 — 실적 발표({s_['next_earnings']})가 코앞이라 위험")
+        if ctx["alerts"]:
+            lines += ["", "⚠️ *보유 종목 확인*"] + [f"• {a.lstrip('⚠️🎯📅 ')}" for a in ctx["alerts"]]
+        elif ctx["positions"]:
+            lines += ["", f"📦 보유 {len(ctx['positions'])}종목 — 손절·목표 도달 없음"]
         ri = ctx["market"].get(self.cfg["regime_index"], {})
-        lines = [f"국면: {ri.get('regime')} ({self.cfg['regime_index']} {ri.get('close')})"]
-        lines.append("내일 후보:")
-        for r in ctx["recommendations"] or []:
-            lines.append(f"- {r['name']}({r['code']}) [{r['strategy']}] 기준 {self.fmt(r['entry_ref_close'])} "
-                         f"손절 {self.fmt(r['stop'])} 목표 {self.fmt(r['target'])} 수량 {r['shares']}")
-        if not ctx["recommendations"]:
-            lines.append("- 없음")
-        for s in ctx.get("skipped_for_earnings", []):
-            lines.append(f"- (제외) {s['code']}: 실적 발표 {s['next_earnings']} 임박")
-        lines += ctx["alerts"]
-        lines.append("전략 가중치: " + (", ".join(f"{k} {v:.0%}" for k, v in ctx["weights"].items() if v > 0) or "없음"))
+        mood = f"\n🌡️ 시장: {LB.regime(ri.get('regime'))}"
+        if ri.get("chg_20d_pct") is not None:
+            idx_name = "S&P500" if self.cfg.is_us else self.cfg["regime_index"]
+            mood += f" ({idx_name} 최근 한 달 {ri['chg_20d_pct']:+.1f}%)"
+        lines.append(mood)
         return "\n".join(lines)
 
     # ------------------------------------------------------------------ proposals
