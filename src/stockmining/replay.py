@@ -7,9 +7,9 @@ only use what was known by that day's close:
   * ``ml_score`` is itself walk-forward (see ml.py), so the AI strategy never saw its test period.
 Positions are marked to market at each close, so the curve shows the drawdowns you would have lived through.
 
-Caveat kept on screen: the single-strategy rows are hindsight comparisons (nobody knew in advance which
-one would win), and rule parameters were chosen from the full history; the learning methods are the
-honest "what would actually have happened" numbers.
+Only methods that could really have been run are included: nothing is picked by its final result.
+Rule parameters are the YAML defaults (from each strategy's source), not values later tuned on the full
+history, so tuning cannot leak the future either.
 
 Result is stored as JSON in kv["replay"] and played back by the dashboard at /sim.
 """
@@ -30,29 +30,55 @@ from . import simulate as SIM
 log = logging.getLogger(__name__)
 AMOUNT = 10_000_000  # virtual KRW shown on screen; curves are ratios so the market's currency does not matter
 WINDOW_DAYS = 730    # learner looks back this far
-SINGLE_SLOTS = 5
 RANDOM_RUNS = 60
 
 
-def _methods(app, names: list[str]) -> list[dict]:
-    from .config import PROFILES
-    aggr = [n for n in PROFILES["aggressive"]["strategy_include"] if n in names]
-    out = [
-        {"id": "learner", "label": "AI 학습기", "slots": 5, "policy": "learner", "pool": None, "kind": "system",
-         "desc": "분기마다 지난 2년간 끝난 거래만 보고, 지금 시장 분위기에서 돈을 번 전략만 골라 써요. "
-                 "실제로 매일 돌아가는 방식과 같아요."},
-        {"id": "best", "label": "분기 1등 따라가기", "slots": 5, "policy": "best_trailing", "pool": None, "kind": "system",
-         "desc": "분기마다 지난 2년 성적이 가장 좋았던 전략 하나만 써요."},
-        {"id": "equal", "label": "전략 전부 섞기", "slots": 10, "policy": "all_equal", "pool": None, "kind": "system",
-         "desc": "고르지 않고 모든 전략 신호를 점수 순으로 10종목까지 담아요."},
-        {"id": "aggr", "label": "공격형 4전략", "slots": 3, "policy": "all_equal", "pool": aggr, "kind": "fixed",
-         "desc": "추세·돌파 전략 4개(" + ", ".join(LB.strat(n) for n in aggr) + ")만, 3종목에 집중해요. "
-                 "백테스트 성적을 보고 고른 묶음이라 지나고 나서 고른 선택이에요."},
-    ]
-    for n in names:
-        out.append({"id": f"s:{n}", "label": LB.strat(n), "slots": SINGLE_SLOTS, "policy": "all_equal", "pool": [n],
-                    "kind": "single", "strategy": n, "desc": f"{LB.strat(n)} 전략 하나만 계속 썼을 때예요."})
+METHODS = [
+    {"id": "learner", "label": "AI 학습기", "slots": 5, "policy": "learner",
+     "desc": "분기마다 지난 2년간 끝난 거래만 보고, 지금 시장 분위기에서 돈을 번 전략만 골라 5종목까지 담아요. "
+             "지금 실제 추천에 쓰는 방식과 같아요."},
+    {"id": "learner10", "label": "AI 학습기 · 넓게", "slots": 10, "policy": "learner",
+     "desc": "AI 학습기와 같은데 10종목으로 나눠 담아요."},
+    {"id": "best", "label": "분기 1등 따라가기", "slots": 5, "policy": "top", "k": 1,
+     "desc": "분기마다 지난 2년 성적이 가장 좋았던 전략 하나만 써요."},
+    {"id": "top3", "label": "분기 상위 3개 전략", "slots": 5, "policy": "top", "k": 3,
+     "desc": "분기마다 지난 2년 성적 상위 3개 전략만 써요."},
+    {"id": "equal", "label": "전략 전부 섞기", "slots": 10, "policy": "all", "desc": "고르지 않고 모든 전략 신호를 점수 순으로 10종목까지 담아요."},
+]
+
+
+def yaml_trades(app, ctx) -> dict[str, list[BT.Trade]]:
+    """Every built-in strategy with its ORIGINAL YAML params; scores → daily percentile within the strategy."""
+    import yaml
+    from . import rules as R
+    panel, regs, _, _ = ctx
+    out = {}
+    for f in sorted(app.cfg.path("strategies_dir").glob("*.yaml")):
+        spec = R.resolve(R.validate(yaml.safe_load(f.read_text(encoding="utf-8"))))
+        BT.prepare_panel(panel, [spec])
+        trades = BT.run(panel, spec, app.cfg["costs"], regs, min_value=app.min_value)
+        if trades:
+            df = pd.DataFrame({"d": [t.signal_date for t in trades], "s": [t.score for t in trades]})
+            pct = df.groupby("d")["s"].rank(pct=True).to_numpy()
+            trades = [BT.Trade(**{**t.__dict__, "score": float(p)}) for t, p in zip(trades, pct)]
+        out[spec["name"]] = trades
     return out
+
+
+def choose(tbs, start, end, m: dict) -> list[BT.Trade]:
+    """Quarter by quarter, pick strategies from trades closed before the quarter began."""
+    if m["policy"] == "learner":
+        return SIM.walk_forward(tbs, start, end, "learner", WINDOW_DAYS)
+    if m["policy"] == "all":
+        return SIM.walk_forward(tbs, start, end, "all_equal", WINDOW_DAYS)
+    chosen = []
+    edges = list(pd.date_range(start, end, freq="QS")) + [end]
+    for qs, qe in zip(edges[:-1], edges[1:]):
+        stats = {n: SIM._trailing_expectancy(tr, qs, WINDOW_DAYS) for n, tr in tbs.items()}
+        good = sorted((n for n, st in stats.items() if st and st["overall"] > 0), key=lambda n: -stats[n]["overall"])
+        for n in good[:m["k"]]:
+            chosen += [t for t in tbs[n] if qs <= t.signal_date < qe]
+    return chosen
 
 
 class _Closes:
@@ -147,7 +173,8 @@ def _learning_log(tbs, edges, dates, regime: pd.Series) -> list[dict]:
         ok = [r for r in rows if r["exp"] is not None]
         best = max(ok, key=lambda r: r["exp"])["s"] if ok and max(r["exp"] for r in ok) > 0 else None
         rows.sort(key=lambda r: -(r["now"] if r["now"] is not None else -99))
-        out.append({"di": di, "date": qs.strftime("%Y-%m-%d"), "regime": rg, "rows": rows, "best": best})
+        top3 = [r["s"] for r in sorted(ok, key=lambda r: -r["exp"]) if r["exp"] > 0][:3]
+        out.append({"di": di, "date": qs.strftime("%Y-%m-%d"), "regime": rg, "rows": rows, "best": best, "top3": top3})
     return out
 
 
@@ -155,7 +182,7 @@ def build(app, ctx=None) -> dict:
     t0 = time.time()
     ctx = ctx or app.full_context()
     panel, regs, idx, info = ctx
-    tbs = SIM.all_trades(app, ctx)
+    tbs = yaml_trades(app, ctx)
     start, last = SIM._bounds(ctx, WINDOW_DAYS)
     ri = app.cfg["regime_index"]
     bench = idx.get(ri)
@@ -170,13 +197,10 @@ def build(app, ctx=None) -> dict:
     names = sorted(tbs)
 
     methods = []
-    for m in _methods(app, names):
-        pool = {k: v for k, v in tbs.items() if not m["pool"] or k in m["pool"]}
-        if not pool:
-            continue
-        chosen = SIM.walk_forward(pool, start, last, m["policy"], WINDOW_DAYS)
+    for m in METHODS:
+        chosen = choose(tbs, start, last, m)
         eq, ev, taken = mark_to_market(chosen, m["slots"], dates, closes)
-        m = {k: v for k, v in m.items() if k not in ("policy", "pool")}
+        m = {k: v for k, v in m.items() if k not in ("policy", "k")}
         m.update(eq=[round(float(x), 4) for x in eq], events=ev, metrics=_stats(eq, dates, taken))
         methods.append(m)
         log.info("replay %-26s total=%s%% mdd=%s%% trades=%s", m["label"], m["metrics"]["total_pct"],
