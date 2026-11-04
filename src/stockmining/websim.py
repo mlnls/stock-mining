@@ -11,6 +11,7 @@ from . import labels as LB
 from .webui import card, empty, h, money, pct, tone
 
 CHART_N = 5  # methods drawn on the chart (+ benchmark)
+TAG = {"system": '<em class="good">미래 모름</em>', "single": '<em>지나고 보니</em>', "fixed": '<em class="warn">지나고 보니</em>'}
 
 
 def load(db) -> dict | None:
@@ -37,13 +38,20 @@ def page_body(R: dict | None) -> str:
     ms, amt = R["methods"], R["amount"]
     top = ms[0]
     learner = next((m for m in ms if m["id"] == "learner"), None)
-    best_sys = next((m for m in ms if m["kind"] == "system"), None)
+    best_sys = next((m for m in ms if m["kind"] == "system"), top)
+    b = R.get("bench") or {}
+    bt = (b.get("metrics") or {}).get("total_pct")
+    sub = ""
+    if top is not best_sys:
+        sub = (f'<p class="lead" style="margin-top:8px">지나고 보니 1등은 <b>{h(top["label"])}</b> '
+               f'{pct(top["metrics"]["total_pct"], 1)}였지만, 그건 미리 알 수 없던 선택이에요.</p>')
     out = [f'<section class="hero"><small>{_dt(R["start"])} ~ {_dt(R["end"])} · 가상 {amt // 10_000:,}만원으로 시작</small>'
-           f'<span class="lbl">가장 많이 번 방식</span><b class="big" style="font-size:28px">{h(top["label"])}</b>'
-           f'<p><span class="{tone(top["metrics"]["total_pct"])}">{pct(top["metrics"]["total_pct"], 1)}</span>'
-           f' · {money(amt * (1 + top["metrics"]["total_pct"] / 100), "KRW")}</p>'
+           f'<span class="lbl">미래를 모르고도 가장 많이 번 방식</span><b class="big" style="font-size:28px">{h(best_sys["label"])}</b>'
+           f'<p><span class="{tone(best_sys["metrics"]["total_pct"])}">{pct(best_sys["metrics"]["total_pct"], 1)}</span>'
+           f' · {money(amt * (1 + best_sys["metrics"]["total_pct"] / 100), "KRW")}'
+           + (f' · {h(b["name"])} {pct(bt, 1)}' if bt is not None else "") + '</p>'
            f'<p class="desc">과거로 돌아가 하루씩 앞으로 가며 투자해 봤어요. 매일 <b>그날 장 마감까지 알 수 있던 것만</b> 보고 '
-           f'다음 날 사고팔았고, 학습하는 방식은 분기마다 <b>이미 끝난 거래만</b> 보고 전략을 다시 골랐어요.</p></section>']
+           f'다음 날 사고팔았고, 학습하는 방식은 분기마다 <b>이미 끝난 거래만</b> 보고 전략을 다시 골랐어요.</p>{sub}</section>']
 
     out.append(
         '<section class="card" id="sim"><div class="simhead"><div><b id="simdate">-</b><small id="simday"></small></div>'
@@ -64,7 +72,7 @@ def page_body(R: dict | None) -> str:
         x = m["metrics"]
         link = f'/strategy/{h(m["strategy"])}' if m.get("strategy") else None
         name = (f'<a href="{link}">{h(m["label"])}</a>' if link else f'<b>{h(m["label"])}</b>')
-        tag = '<em class="good">학습</em>' if m["kind"] == "system" else '<em>단독</em>'
+        tag = TAG.get(m["kind"], "")
         rows += (f'<tr><td>{i}. {name} {tag}<small class="sub">{m["slots"]}종목 · 거래 {x["trades"]}번'
                  f'{" · 이긴 비율 " + pct(x["win_rate"], 0, False) if x["win_rate"] is not None else ""}</small></td>'
                  f'<td class="{tone(x["total_pct"])}">{pct(x["total_pct"], 1)}</td><td>{pct(x["cagr_pct"], 1)}</td>'
@@ -83,14 +91,28 @@ def page_body(R: dict | None) -> str:
                     '<div class="tscroll"><table class="t rank"><thead><tr><th>방식</th><th>총수익</th><th>1년 환산</th>'
                     f'<th>최대 낙폭</th></tr></thead><tbody>{rows}</tbody></table></div>', count=f"{len(ms)}개"))
 
-    notes = []
-    if learner and best_sys:
-        notes.append(f"<b>현실적인 성적은 '학습' 방식</b>이에요. 단독 전략 1등은 지나고 나서야 알 수 있는 거라 그대로 믿으면 안 돼요. "
-                     f"미리 알 수 있었던 방식 중엔 <b>{h(best_sys['label'])}</b>가 {pct(best_sys['metrics']['total_pct'], 1)}로 가장 좋았어요.")
+    notes = ["<b>'미래 모름'</b> 방식은 그때 알 수 있던 정보만으로 전략을 골라서, 실제로 했어도 같은 결과가 나와요. "
+             "<b>'지나고 보니'</b>는 어떤 전략이 잘될지 미리 안다고 치고 계산한 거라 그대로 믿으면 안 돼요."]
+    if bt is not None:
+        for m in [x for x in (best_sys, learner) if x]:
+            d = m["metrics"]["total_pct"] - bt
+            notes.append(f"{h(m['label'])}: {h(b['name'])}을 그냥 들고 있었을 때({pct(bt, 1)})보다 "
+                         f"{abs(d):.0f}%p {'더 벌었어요' if d > 0 else '덜 벌었어요'}. 대신 최대 낙폭은 "
+                         f"{m['metrics']['mdd_pct']:.0f}% (지수 {b['metrics']['mdd_pct']:.0f}%)였어요.")
+    rnd = R.get("random")
     if rnd and learner:
         diff = learner["metrics"]["total_pct"] - rnd["median_pct"]
-        notes.append(f"AI 학습기는 아무거나 고른 경우보다 {abs(diff):.1f}%p {'더 벌었어요' if diff > 0 else '덜 벌었어요'}. "
-                     + ("고르는 실력이 운보다 낫다는 뜻이에요." if diff > 0 else "아직은 고르는 실력이 운과 구분이 안 돼요."))
+        notes.append(f"AI 학습기는 같은 신호를 아무거나 고른 경우보다 {abs(diff):.1f}%p {'더 벌었어요' if diff > 0 else '덜 벌었어요'}. "
+                     + ("다만 차이가 작아서 실력이라고 하기엔 아직 일러요." if 0 < diff < 15 else
+                        "고르는 실력이 운보다 낫다는 뜻이에요." if diff > 0 else "아직은 고르는 실력이 운과 구분이 안 돼요."))
+    best = next((m for m in ms if m["id"] == "best"), None)
+    twin = best and next((m for m in ms if m["kind"] == "single" and m["eq"] == best["eq"]), None)
+    if twin:
+        notes.append(f"분기 1등 따라가기는 이 기간 내내 <b>{h(twin['label'])}</b>을 1등으로 골라서 두 결과가 똑같아요.")
+    wins = sorted((e for e in top["events"] if e[1] == "s" and e[5] is not None), key=lambda e: -e[5])[:3]
+    if wins:
+        notes.append(f"1등 {h(top['label'])}은 거래 {top['metrics']['trades']}번 중 몇 번의 대박이 대부분을 벌었어요: "
+                     + ", ".join(f"{h(e[2])} {pct(e[5], 0)}" for e in wins) + ". 이런 종목을 다시 만난다는 보장은 없어요.")
     notes += ["거래 비용(수수료·슬리피지)은 넣어서 계산했어요. 세금과 환율 변화는 넣지 않았어요.",
               "전략 규칙의 숫자(파라미터)는 전체 기간을 보고 정한 거라 약간은 미래를 아는 셈이에요. 실제로는 이보다 덜 벌 가능성이 커요.",
               "지금 상장된 종목 위주의 데이터라 상장폐지된 종목이 빠져 있어요(생존 편향). 이것도 성적을 부풀려요."]
@@ -215,7 +237,7 @@ function board(){
   rows.forEach(function(r,i){var m=r.m,on=CH.indexOf(m.id)>=0;if(!on&&m.id!==focus&&i>=6)return;shown++;
     html+='<a class="row'+(m.id===focus?" on":"")+'" data-id="'+m.id+'"><span class="rk">'+(i+1)+'</span><span class="sw" style="'+
       (on?"background:"+col(m.ci):m.id===focus?"background:currentColor":"")+'"></span><span class="rt"><b>'+m.label+'</b><small>'+
-      (m.kind==="system"?"학습 · ":"단독 · ")+m.slots+'종목</small></span><span class="rr"><b class="'+(r.v>1?"up":r.v<1?"down":"")+'">'+
+      ({system:"미래 모름 · ",single:"지나고 보니 · ",fixed:"지나고 보니 · "}[m.kind]||"")+m.slots+'종목</small></span><span class="rr"><b class="'+(r.v>1?"up":r.v<1?"down":"")+'">'+
       pc((r.v-1)*100)+'</b><small>'+won(R.amount*r.v)+'</small></span></a>'});
   if(B)html+='<a class="row"><span class="rk"></span><span class="sw bench"></span><span class="rt"><b>'+R.bench.name+
     '</b><small>그냥 들고 있기</small></span><span class="rr"><b class="'+(B[di]>1?"up":B[di]<1?"down":"")+'">'+pc((B[di]-1)*100)+
@@ -242,7 +264,7 @@ function learn(){
   $("simlearnlead").textContent=dt(q.date)+"에 그때까지 끝난 거래만 보고 다시 골랐어요. 시장 분위기는 "+(REG[{bull:"u",bear:"d"}[q.regime]||"n"]||REG.n)[0]+
     " → AI 학습기가 쓸 전략 "+used+"개"+(q.best?" · 1등 따라가기는 "+(R.strat_ko[q.best]||q.best):"");
   box.innerHTML=q.rows.map(function(r){return '<div class="lrn'+(r.use?"":" off")+'"><span>'+(r.use?"✅":"⛔")+'</span><span class="rt"><b>'+
-    (R.strat_ko[r.s]||r.s)+(r.s===q.best?' <em class="good">1등</em>':"")+'</b><small>'+(r.n?"지난 2년 거래 "+r.n+"번 · 한 번 평균 "+pc(r.exp,2):"아직 기록이 부족해요")+
+    (R.strat_ko[r.s]||r.s)+(r.s===q.best?' <em class="good">1등</em>':"")+'</b><small>'+(r.n?"지난 2년 신호 "+r.n+"번 · 한 번 평균 "+pc(r.exp,2):"아직 기록이 부족해요")+
     '</small></span><span class="rr"><b class="'+(r.now>0?"up":r.now<0?"down":"")+'">'+(r.now==null?"-":pc(r.now,2))+'</b><small>지금 장세 기대</small></span></div>'}).join("");
   var k=R.ml_retrain.filter(function(x){return x<=di}).length;
   $("simml").textContent=R.ml_retrain.length?"🤖 AI 점수 모델은 이 날까지 "+k+"번 다시 학습했어요 (약 3개월마다, 그때까지의 데이터로만).":""}

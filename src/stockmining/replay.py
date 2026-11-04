@@ -45,8 +45,9 @@ def _methods(app, names: list[str]) -> list[dict]:
          "desc": "분기마다 지난 2년 성적이 가장 좋았던 전략 하나만 써요."},
         {"id": "equal", "label": "전략 전부 섞기", "slots": 10, "policy": "all_equal", "pool": None, "kind": "system",
          "desc": "고르지 않고 모든 전략 신호를 점수 순으로 10종목까지 담아요."},
-        {"id": "aggr", "label": "공격형 4전략", "slots": 3, "policy": "all_equal", "pool": aggr, "kind": "system",
-         "desc": "추세·돌파 전략 4개(" + ", ".join(LB.strat(n) for n in aggr) + ")만, 3종목에 집중해요."},
+        {"id": "aggr", "label": "공격형 4전략", "slots": 3, "policy": "all_equal", "pool": aggr, "kind": "fixed",
+         "desc": "추세·돌파 전략 4개(" + ", ".join(LB.strat(n) for n in aggr) + ")만, 3종목에 집중해요. "
+                 "백테스트 성적을 보고 고른 묶음이라 지나고 나서 고른 선택이에요."},
     ]
     for n in names:
         out.append({"id": f"s:{n}", "label": LB.strat(n), "slots": SINGLE_SLOTS, "policy": "all_equal", "pool": [n],
