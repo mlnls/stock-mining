@@ -225,6 +225,8 @@ src/stockmining/
   bot.py        Slack(기본)·텔레그램 봇
 strategies/*.yaml   내장 전략 (출처 포함)
 principles.md       초기 원칙 (미국 스윙용. 운영 중에는 data/principles.md 가 갱신됨)
+principles_kr.md    국내 초기 원칙 (ISA 스윙용. 운영 중에는 data/principles_kr.md)
+strategies/kr/      국내 전략 규칙 (미국 strategies/*.yaml 과 따로 관리)
 deploy/             Terraform, systemd, 배포 스크립트
 ```
 

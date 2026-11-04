@@ -1,0 +1,26 @@
+name: minervini_vcp
+description: >
+  Mark Minervini SEPA: 트렌드 템플릿(정배열, 200일선 상승, 52주 저점 +30%·고점 −25% 이내,
+  상대강도 상위 30%) + 변동성 수축(최근 10일 변동성이 한 달 전의 70% 미만) + 거래량 마름 후
+  15일 고점을 거래량 40% 이상 늘며 돌파. 손절 7%, 3ATR 트레일링.
+source_note: "Minervini, Trade Like a Stock Market Wizard (VCP). 1997·2021 US Investing Championship 우승(주최측 검증)"
+regimes: [bull, neutral]
+params: {rs_min: 70, contraction: 0.7}
+param_grid: {rs_min: [70, 80], contraction: [0.6, 0.7, 0.8]}
+entry:
+  type: next_open
+  all:
+    - "close > sma_50 and sma_50 > sma_150 and sma_150 > sma_200"
+    - "sma_200 > prev(sma_200, 20)"
+    - "close >= 1.3 * ll_250"
+    - "close >= 0.75 * hh_250"
+    - "xrank_ret_120 >= {rs_min}"
+    - "prev(natr_10, 1) < {contraction} * prev(natr_10, 30)"
+    - "prev(vma_10, 1) < prev(vma_50, 1)"
+    - "close > hh_15"
+    - "vol_ratio_50 >= 1.4"
+rank: "xrank_ret_120"
+exit:
+  stop_pct: 7
+  trail_atr: 3
+  max_hold: 60

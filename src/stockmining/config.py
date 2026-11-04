@@ -82,6 +82,9 @@ MARKET_DEFAULTS: dict[str, dict[str, Any]] = {
     },
     "kr": {
         "db_path": "data/stockmining.db",
+        # learns on its own: own rule files, own principles, own DB (strategies, tuning, ML, learner)
+        "principles_path": "data/principles_kr.md",
+        "strategies_dir": "strategies/kr",
         "timezone": "Asia/Seoul",
         "calendar": "XKRX",
         "currency": "KRW",

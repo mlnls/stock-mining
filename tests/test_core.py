@@ -209,3 +209,23 @@ def test_web_routes_both_markets(tmp_path, monkeypatch):
         khtml = web.route(cfgs["us"], us, "/kr" + path, {}, (cfgs["kr"], kr))
         assert khtml.count('href="/picks"') <= 1 and 'href="/kr/picks"' in khtml  # only the 🇺🇸 toggle leaves /kr
     assert "준비" in web.route(cfgs["us"], us, "/kr", {}, None)
+
+
+def test_markets_learn_separately(tmp_path):
+    """US and KR never share rule files, principles or a DB — each market learns only from its own data."""
+    from stockmining.config import load_config
+    from stockmining.jobs import App
+    apps = {}
+    for m in ("us", "kr"):
+        p = tmp_path / f"{m}.yaml"
+        p.write_text(yaml.safe_dump({"market": m, "notifier": "console",
+                                     "db_path": str(tmp_path / f"{m}.db"),
+                                     "principles_path": str(tmp_path / f"principles_{m}.md")}))
+        apps[m] = App(load_config(p))
+    us, kr = apps["us"], apps["kr"]
+    assert us.cfg.path("strategies_dir") != kr.cfg.path("strategies_dir")
+    assert us.cfg.path("db_path") != kr.cfg.path("db_path")
+    assert "미국" in us.principles() and "국내" in kr.principles() and "S&P" not in kr.principles()
+    assert sorted(us.seed_strategies()) == sorted(kr.seed_strategies())  # same starting rules, separate copies
+    kr.db.execute("UPDATE strategies SET status='muted' WHERE name='rsi2_reversion'")
+    assert {s["name"]: s["status"] for s in us.db.strategies()}["rsi2_reversion"] == "active"

@@ -27,7 +27,7 @@ FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
 MARKET_DESC = {
     "us": "미국 주식(NYSE·NASDAQ, 한국에 사는 개인 투자자가 국내 증권사로 거래, 통화 USD)",
-    "kr": "한국 주식(KOSPI·KOSDAQ, 통화 KRW)",
+    "kr": "한국 주식(KOSPI·KOSDAQ, ISA 계좌에서 거래, 통화 KRW). 미국 시장의 결론을 그대로 가져오지 말고 국내 데이터로만 판단",
 }
 
 SYSTEM_BASE = """당신은 {market} 스윙 트레이딩 시스템의 분석가입니다.

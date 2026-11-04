@@ -75,6 +75,10 @@ if [ -z "$LOCAL" ] && [ ! -f "$DATA/stockmining.db" ]; then
   $AWS s3 cp "s3://$BUCKET/backups/stockmining.db" "$DATA/stockmining.db" 2>/dev/null && echo "DB restored" || true
   $AWS s3 cp "s3://$BUCKET/backups/principles.md" "$DATA/principles.md" 2>/dev/null || true
 fi
+if [ -z "$LOCAL" ] && [ ! -f "$DATA/stockmining_kr.db" ]; then
+  $AWS s3 cp "s3://$BUCKET/backups/stockmining_kr.db" "$DATA/stockmining_kr.db" 2>/dev/null && echo "KR DB restored" || true
+  $AWS s3 cp "s3://$BUCKET/backups/principles_kr.md" "$DATA/principles_kr.md" 2>/dev/null || true
+fi
 chown -R stockmining:stockmining "$DATA"
 chmod 0640 "$ETC"/*; chgrp stockmining "$ETC"/*
 

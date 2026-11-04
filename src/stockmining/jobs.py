@@ -93,7 +93,7 @@ class App:
         p = self.principles_path
         if not p.exists():
             p.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy(ROOT / "principles.md", p)
+            shutil.copy(ROOT / ("principles.md" if self.cfg.is_us else "principles_kr.md"), p)
         return p.read_text(encoding="utf-8")
 
     @property
