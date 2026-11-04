@@ -152,8 +152,8 @@ class App:
         D.refresh_universe(self.db, self.cfg.raw)
         self.backtest_all()
 
-    def backtest_all(self) -> dict:
-        ctx = self.full_context()
+    def backtest_all(self, ctx=None) -> dict:
+        ctx = ctx or self.full_context()
         out = {}
         now = self.now().isoformat(timespec="seconds")
         for st in self.db.strategies(("active", "muted")):
@@ -170,6 +170,14 @@ class App:
                      st["name"], f.get("trades"), f.get("win_rate"), f.get("expectancy_pct"),
                      f.get("profit_factor"), f.get("cagr_pct"), f.get("mdd_pct"), res["oos"].get("profit_factor"))
         return out
+
+    def replay(self, ctx=None) -> dict | None:
+        from . import replay as RP
+        try:
+            return RP.run(self, ctx)
+        except Exception as e:
+            log.error("replay failed: %s", e, exc_info=True)
+            return None
 
     # ------------------------------------------------------------------ evening
     def evening(self, day: str | None = None, force: bool = False) -> None:
@@ -453,8 +461,9 @@ class App:
             else:
                 lines.append(f"#{pid} ⚙️ {msg}  /approve {pid}")
 
-        # 2) refresh backtests (priors for the learner)
-        self.backtest_all()
+        # 2) refresh backtests (priors for the learner) + time-machine replay for the dashboard
+        self.backtest_all(ctx)
+        self.replay(ctx)
 
         # 3) edge map: where does each strategy win/lose? strong findings → filter → gate → proposal
         edge = {}

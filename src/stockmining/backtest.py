@@ -25,6 +25,7 @@ class Trade:
     score: float
     regime: str
     hold: int
+    strategy: str = ""
 
 
 def net_return(entry: float, exit: float, costs: dict) -> float:
@@ -97,6 +98,8 @@ def run(
     out: list[Trade] = []
     for code, df in panel.items():
         out += ticker_trades(code, df, spec, costs, regimes_by_code.get(code), start, end, min_value)
+    for t in out:
+        t.strategy = spec.get("name", "")
     return out
 
 

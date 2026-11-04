@@ -174,3 +174,17 @@ def test_ml_score_walk_forward_has_no_early_predictions(monkeypatch):
     later = s.iloc[ml.MIN_TRAIN:].dropna()
     assert len(later) > 100 and later.between(0, 100).all()
     assert "sma_200" not in panel["T0"].columns         # helper features are not cached on the panel
+
+
+def test_replay_mark_to_market_values_open_positions_daily():
+    import pandas as pd
+    from stockmining import backtest as BT
+    from stockmining import replay as RP
+    dates = pd.bdate_range("2024-01-01", periods=6)
+    panel = {"AAA": pd.DataFrame({"close": [10, 10, 11, 12, 9, 9]}, index=dates)}
+    t = BT.Trade("AAA", dates[0], dates[1], dates[4], 10.0, 9.0, "stop", -10.0, 1.0, "bull", 4, "x")
+    eq, ev, taken = RP.mark_to_market([t], 2, dates, RP._Closes(panel))
+    # half the money in AAA from day 1, valued at each close, realised on exit day 4
+    assert eq[0] == 1.0 and abs(eq[2] - 1.05) < 1e-9 and abs(eq[3] - 1.10) < 1e-9
+    assert abs(eq[4] - 0.95) < 1e-9 and abs(eq[5] - 0.95) < 1e-9
+    assert [e[1] for e in ev] == ["b", "s"] and len(taken) == 1

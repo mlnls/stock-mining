@@ -26,7 +26,8 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("--force", action="store_true")
     sub.add_parser("weekly", help="주간 학습: 파라미터 튜닝 + Claude 리서치 + 백테스트 갱신")
     sub.add_parser("bot", help="텔레그램 봇 (상시 실행)")
-    sub.add_parser("backtest", help="모든 전략 백테스트")
+    sub.add_parser("backtest", help="모든 전략 백테스트 + 타임머신 모의투자(대시보드 /sim)")
+    sub.add_parser("replay", help="타임머신 모의투자만 다시 계산 (대시보드 /sim)")
     s = sub.add_parser("test-rule", help="JSON/YAML 규칙 파일 백테스트")
     s.add_argument("path")
     s = sub.add_parser("engine", help="데이터 갱신 없이 엔진만 실행 (최근 데이터 날짜 기준)")
@@ -74,7 +75,11 @@ def main(argv: list[str] | None = None) -> None:
         print(bot.handle(app, "/hold " + " ".join(a.args)))
     elif a.cmd == "backtest":
         app.seed_strategies()
-        app.backtest_all()
+        ctx = app.full_context()
+        app.backtest_all(ctx)
+        app.replay(ctx)
+    elif a.cmd == "replay":
+        app.replay()
     elif a.cmd == "test-rule":
         import yaml
         spec = yaml.safe_load(open(a.path, encoding="utf-8"))

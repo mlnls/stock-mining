@@ -1,6 +1,6 @@
 """Read-only web dashboard: ``stockmining web`` — a small multi-page site (stdlib HTTP server).
 
-Pages: 홈 · 내 자산 · 추천 · 전략(목록·상세) · 종목 상세 · 리포트(목록·상세·학습 일지·제안·엣지 맵).
+Pages: 홈 · 내 자산 · 추천 · 전략(목록·상세) · 모의투자(타임머신 리플레이) · 종목 상세 · 리포트(목록·상세·학습 일지·제안·엣지 맵).
 Prices on screen are live (Naver for KRX, Yahoo for US/FX; see quotes.py) and refresh every 20 s through
 ``/api/quotes``. The DB is opened read-only. Access needs HTTP basic auth with WEB_PASSWORD (user WEB_USER,
 default "me"); without a password the server only listens on localhost.
@@ -22,6 +22,7 @@ from . import docfmt as DF
 from . import journal as J
 from . import labels as LB
 from . import quotes as Q
+from . import websim as WS
 from .config import Config
 from .db import DB
 from .webui import (avatar, card, chart, chips, doc_html, empty, explain, explain_exit, fold_row, h, inline, kst, kv,
@@ -162,6 +163,8 @@ def home(c: Ctx) -> tuple[str, str, list[str]]:
                         live(r["code"], "price", q, c.cur), "기준가 대비 " + live(r["code"], "vs", q, c.cur, ref=r["entry_ref"]))
     body.append(card("내일 살 후보", lst or empty("😴", "내일 살 종목이 없어요."), ("/picks", "자세히"),
                      f"{len(recs)}개" if recs else ""))
+
+    body.append(WS.home_card(WS.load(c.db)))
 
     r = c.db.query("SELECT * FROM reports WHERE kind IN ('evening','morning') ORDER BY id DESC LIMIT 1")
     if r:
@@ -452,6 +455,8 @@ def route(cfg: Config, db: DB, path: str, query: dict) -> str:
         (title, body, codes), tab, back = stock(c, parts[1]), "", "javascript:history.back()"
     elif parts == ["reports"]:
         (title, body, codes), tab = reports(c, (query.get("t") or ["list"])[0]), "/reports"
+    elif parts == ["sim"]:
+        title, body, codes, tab = "타임머신 모의투자", WS.page_body(WS.load(db)), [], "/sim"
     elif len(parts) == 2 and parts[0] == "report":
         (title, body, codes), tab, back = report(c, parts[1]), "/reports", "/reports"
     else:
@@ -486,6 +491,12 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
         query = parse_qs(url.query)
+        if url.path == "/api/sim":
+            db = ReadOnlyDB(self.cfg.path("db_path"))
+            try:
+                return self._send(200, db.get("replay") or "null", "application/json")
+            finally:
+                db.conn.close()
         if url.path == "/api/quotes":
             codes = [x for x in (query.get("c") or [""])[0].split(",") if re.fullmatch(r"[A-Za-z0-9.\-^=]{1,12}", x)][:60]
             return self._send(200, json.dumps(Q.get(codes)), "application/json")
