@@ -22,6 +22,7 @@ from . import docfmt as DF
 from . import journal as J
 from . import labels as LB
 from . import quotes as Q
+from . import live as LV
 from . import websim as WS
 from .config import Config
 from .db import DB
@@ -173,6 +174,7 @@ def home(c: Ctx) -> tuple[str, str, list[str]]:
     body.append(card("내일 살 후보", lst or empty("😴", "내일 살 종목이 없어요."), ("/picks", "자세히"),
                      f"{len(recs)}개" if recs else ""))
 
+    body.append(WS.live_home(LV.load(c.db)))
     body.append(WS.home_card(WS.load(c.db)))
 
     r = c.db.query("SELECT * FROM reports WHERE kind IN ('evening','morning') ORDER BY id DESC LIMIT 1")
@@ -475,7 +477,7 @@ def route(cfg: Config, db: DB, path: str, query: dict, kr: tuple | None = None) 
             c = Ctx(cfg, db, markets=markets)
         (title, body, codes), tab, back = stock(c, parts[1]), "", "javascript:history.back()"
     elif parts == ["sim"]:
-        title, body, codes, tab = ("타임머신 모의투자" + (" · 국내" if base else ""), WS.page_body(WS.load(c.db)), [], "/sim")
+        title, body, codes, tab = ("타임머신 모의투자" + (" · 국내" if base else ""), WS.live_page(LV.load(c.db)) + WS.page_body(WS.load(c.db)), [], "/sim")
     elif parts == ["reports"]:
         (title, body, codes), tab = reports(c, (query.get("t") or ["list"])[0]), "/reports"
     elif len(parts) == 2 and parts[0] == "report":

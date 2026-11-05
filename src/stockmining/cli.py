@@ -28,6 +28,7 @@ def main(argv: list[str] | None = None) -> None:
     sub.add_parser("bot", help="텔레그램 봇 (상시 실행)")
     sub.add_parser("backtest", help="모든 전략 백테스트 + 타임머신 모의투자(대시보드 /sim)")
     sub.add_parser("replay", help="타임머신 모의투자만 다시 계산 (대시보드 /sim)")
+    sub.add_parser("live", help="지금부터 모의투자: 시작(처음 한 번) 또는 밀린 날 처리")
     s = sub.add_parser("test-rule", help="JSON/YAML 규칙 파일 백테스트")
     s.add_argument("path")
     s = sub.add_parser("engine", help="데이터 갱신 없이 엔진만 실행 (최근 데이터 날짜 기준)")
@@ -80,6 +81,8 @@ def main(argv: list[str] | None = None) -> None:
         app.replay(ctx)
     elif a.cmd == "replay":
         app.replay()
+    elif a.cmd == "live":
+        app.live(notify=False)
     elif a.cmd == "test-rule":
         import yaml
         spec = yaml.safe_load(open(a.path, encoding="utf-8"))

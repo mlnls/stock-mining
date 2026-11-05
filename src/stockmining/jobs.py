@@ -195,6 +195,19 @@ class App:
             self.tg.send(f"[저녁 배치] 데이터 갱신 실패: {upd['reason']}")
             return
         self.run_engine(day)
+        self.live()
+
+    def live(self, ctx=None, notify: bool = True) -> dict | None:
+        """Forward mock investing (10M per method from its start day, see live.py)."""
+        from . import live as LV
+        try:
+            st = LV.update(self, ctx)
+        except Exception as e:
+            log.error("live mock investing failed: %s", e, exc_info=True)
+            return None
+        if notify and st and st["last"] != st["start"]:
+            self.tg.send(LV.slack_lines(st))
+        return st
 
     def run_engine(self, day: str) -> dict:
         cfg = self.cfg.raw

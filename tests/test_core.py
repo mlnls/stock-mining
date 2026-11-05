@@ -239,3 +239,39 @@ def test_seed_refuses_empty_strategies_dir(tmp_path):
                                  "strategies_dir": str(tmp_path / "none")}))
     with pytest.raises(FileNotFoundError):
         App(load_config(p)).seed_strategies()
+
+
+def test_live_ledger_moves_forward_only(tmp_path, monkeypatch):
+    """Starts today with nothing bought; processes only unseen days; never rewrites a processed day."""
+    from stockmining import live as LV
+    from stockmining import web
+    from stockmining import quotes as Q
+    from stockmining.config import load_config
+    from stockmining.jobs import App
+    monkeypatch.setattr(Q, "get", lambda codes: {})
+    p = tmp_path / "c.yaml"
+    p.write_text(yaml.safe_dump({"market": "kr", "notifier": "console", "db_path": str(tmp_path / "k.db"),
+                                 "principles_path": str(tmp_path / "p.md")}))
+    app = App(load_config(p))
+    idx = pd.bdate_range("2024-01-01", periods=700)
+    rng = np.random.default_rng(3)
+    panel = {}
+    for k in range(6):
+        c = 10000 * np.exp(np.cumsum(rng.normal(0.0008, 0.02, len(idx))))
+        panel[f"00000{k}"] = pd.DataFrame({"open": c * (1 + rng.normal(0, 0.003, len(idx))), "high": c * 1.01,
+                                          "low": c * 0.99, "close": c, "volume": 5e6}, index=idx)
+    bench = pd.DataFrame({"close": np.linspace(100, 120, len(idx))}, index=idx)
+    full = lambda n: ({k: v.iloc[:n].copy() for k, v in panel.items()}, {}, {"KS11": bench.iloc[:n]}, {})
+    monkeypatch.setattr(LV.RP, "yaml_trades", lambda app, ctx: {})  # no signals needed to test the ledger
+    st = LV.new_state(app, idx[600].strftime("%Y-%m-%d"))
+    LV.save(app.db, st)
+    st = LV.update(app, full(601))
+    assert st["last"] == idx[600].strftime("%Y-%m-%d") and len(st["methods"]["best"]["eq"]) == 1  # nothing yet
+    st = LV.update(app, full(605))
+    eq1 = list(st["methods"]["best"]["eq"])
+    assert len(eq1) == 5 and st["last"] == idx[604].strftime("%Y-%m-%d")
+    st = LV.update(app, full(605))  # same data again → nothing changes
+    assert st["methods"]["best"]["eq"] == eq1
+    assert abs(st["bench"]["eq"][-1][1] - bench["close"].iloc[604] / bench["close"].iloc[600]) < 1e-6
+    db = app.db
+    assert "지금부터 모의투자" in web.route(app.cfg, db, "/sim", {}) and "지금부터 모의투자" in web.route(app.cfg, db, "/", {})

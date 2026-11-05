@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 
+from . import labels as LB
 from .webui import card, empty, h, money, pct, tone
 
 CHART_N = 5  # methods drawn on the chart (+ benchmark)
@@ -253,4 +254,128 @@ function learn(){
   var k=R.ml_retrain.filter(function(x){return x<=di}).length;
   $("simml").textContent=R.ml_retrain.length?"🤖 AI 점수 모델은 이 날까지 "+k+"번 다시 학습했어요 (약 3개월마다, 그때까지의 데이터로만).":""}
 })();
+</script>"""
+
+
+# ---------------------------------------------------------------- forward mock investing (live.py, kv["live"])
+LIVE_ORDER = ["learner", "learner10", "best", "top3", "equal"]  # colour follows the method, never its rank
+WHY_KO = {"stop": "손절", "stop_gap": "손절(갭)", "target": "목표가", "target_gap": "목표가(갭)", "rule": "조건 청산",
+          "time": "기간 만료"}
+
+
+def _live_chart(L: dict) -> str:
+    ser = [(k, L["methods"][k]) for k in LIVE_ORDER if k in L["methods"]]
+    n = len(ser[0][1]["eq"]) if ser else 0
+    if n < 3:
+        return ""
+    data = {"d": [p[0] for p in ser[0][1]["eq"]], "s": [{"k": k, "i": LIVE_ORDER.index(k), "l": m["label"],
+                                                        "v": [p[1] for p in m["eq"]]} for k, m in ser]}
+    be = L["bench"]["eq"]
+    if len(be) == n:
+        data["b"] = {"l": L["bench"]["name"], "v": [p[1] for p in be]}
+    return (f'<div class="lvchart" id="lvchart" role="img" aria-label="방식별 평가액 변화" '
+            f'data-j=\'{h(json.dumps(data, ensure_ascii=False, separators=(",", ":")))}\'></div>')
+
+
+def live_card(L: dict | None, base: str = "") -> str:
+    if not L:
+        return ""
+    amt, ms = L["amount"], L["methods"]
+    days = len(next(iter(ms.values()))["eq"]) - 1
+    head = (f'<p class="lead">{_dt(L["start"])}부터 방식마다 <b>가상 {amt // 10_000:,}만원</b>으로 실제처럼 굴려요. '
+            '매일 장 마감 후 그날 일만 처리하고, 한 번 기록한 날은 다시 고치지 않아요. ⭐는 Claude가 고른 방식이에요'
+            + (" (미국은 원화로 바꿔 넣었다고 치고, 환율 변화는 빼고 계산)" if L.get("market") == "us" else "") + '.</p>')
+    if days == 0:
+        return card("📒 지금부터 모의투자", head + empty("⏳", "첫 매수는 <b>다음 거래일 시가</b>에 해요. 오늘 장 마감 신호로 골라요."),
+                    count=f"{_dt(L['start'])} 시작")
+    from . import live as LV
+    rows = ""
+    for r in LV.summary(L):
+        g = (r["eq"] - 1) * 100
+        rows += (f'<tr><td><i class="sw lv{LIVE_ORDER.index(r["id"]) if r["id"] in LIVE_ORDER else 0}"></i>'
+                 f'{"⭐ " if r["pick"] else ""}<b>{h(r["label"])}</b><small class="sub">보유 {r["n"]}종목 · 산 횟수 {r["trades"]}번</small></td>'
+                 f'<td>{money(amt * r["eq"], "KRW")}</td><td class="{tone(g)}">{pct(g, 1)}</td></tr>')
+    b = L["bench"]["eq"][-1][1] if L["bench"]["eq"] else None
+    if b:
+        rows += (f'<tr class="ref"><td><i class="sw ref"></i>📈 {h(L["bench"]["name"])} 그냥 들고 있기</td>'
+                 f'<td>{money(amt * b, "KRW")}</td><td class="{tone(b - 1)}">{pct((b - 1) * 100, 1)}</td></tr>')
+    body = head + _live_chart(L) + ('<div class="tscroll"><table class="t rank"><thead><tr><th>방식</th><th>지금 평가액</th>'
+                                    f'<th>수익률</th></tr></thead><tbody>{rows}</tbody></table></div>')
+    P = ms.get(L.get("pick"))
+    if P:
+        nm = L.get("names", {})
+        hold = "".join(
+            f'<li class="note"><span class="d">{p["entry_date"][5:].replace("-", "/")}</span><span class="x">'
+            f'<b>{h(nm.get(p["code"], p["code"]))}</b> <span class="{tone(p["last"] / p["entry"] - 1)}">'
+            f'{pct((p["last"] / p["entry"] - 1) * 100, 1)}</span><small>{h(LB.strat(p["strategy"]))} · 산 가격 {p["entry"]:,.2f} · '
+            f'손절 {p["stop"]:,.2f}' + (f' · 목표 {p["target"]:,.2f}' if p.get("target") else "") + '</small></span></li>'
+            for p in P["pos"])
+        feed = "".join(
+            f'<li class="note"><span class="d">{e[0][5:].replace("-", "/")}</span><span class="x">'
+            f'{"🟢 샀어요" if e[1] == "b" else "🔴 팔았어요"} <b>{h(nm.get(e[2], e[2]))}</b>'
+            + (f' <span class="{tone(e[5])}">{pct(e[5], 1)}</span>' if e[1] == "s" else "")
+            + f'<small>{h(LB.strat(e[3]))}' + (f' · {WHY_KO.get(e[6], e[6])}' if e[1] == "s" else "") + '</small></span></li>'
+            for e in reversed(P["events"][-10:]))
+        body += (f'<h3 class="lvh">⭐ {h(P["label"])} · 지금 들고 있는 것</h3>'
+                 + (f'<ul class="plain feed">{hold}</ul>' if hold else '<p class="lead">지금은 현금만 들고 있어요.</p>')
+                 + (f'<h3 class="lvh">최근 매매</h3><ul class="plain feed">{feed}</ul>' if feed else ""))
+    return card("📒 지금부터 모의투자", body, count=f"{days}거래일째")
+
+
+def live_page(L: dict | None) -> str:
+    c = live_card(L)
+    return (c + LIVE_CSS + LIVE_JS) if c else ""
+
+
+def live_home(L: dict | None, base: str = "") -> str:
+    if not L:
+        return ""
+    from . import live as LV
+    rows = LV.summary(L)
+    pick = next((r for r in rows if r["pick"]), rows[0] if rows else None)
+    if not pick:
+        return ""
+    g = (pick["eq"] - 1) * 100
+    return card("📒 지금부터 모의투자",
+                f'<a class="row" href="{base}/sim"><span class="av">⭐</span><span class="rt"><b>{h(pick["label"])}</b>'
+                f'<small>{_dt(L["start"])}부터 가상 {L["amount"] // 10_000:,}만원 · {len(rows)}개 방식 경쟁 중</small></span>'
+                f'<span class="rr"><b>{money(L["amount"] * pick["eq"], "KRW")}</b><small class="{tone(g)}">{pct(g, 1)}</small></span>'
+                f'<span class="go"></span></a>', (f"{base}/sim", "보기"))
+
+
+LIVE_CSS = """<style>
+.sw{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:7px;vertical-align:0}
+.lv0{background:#2a78d6}.lv1{background:#eb6834}.lv2{background:#1baf7a}.lv3{background:#eda100}.lv4{background:#e87ba4}
+.sw.ref{background:transparent;border:1.5px dashed var(--ink3)}
+@media (prefers-color-scheme:dark){.lv0{background:#3987e5}.lv1{background:#d95926}.lv2{background:#199e70}.lv3{background:#c98500}.lv4{background:#d55181}}
+.lvh{font-size:15px;margin:18px 0 2px}.lvchart{position:relative;height:180px;margin:4px 0 10px;touch-action:pan-y}
+.lvchart svg{display:block;width:100%;height:100%;overflow:visible}.lvchart .g{stroke:var(--line)}.lvchart .gl{fill:var(--ink3);font-size:11px}
+.lvchart .ln{fill:none;stroke-width:2;stroke-linejoin:round;stroke-linecap:round}.lvchart .bench{stroke:var(--ink3);stroke-dasharray:5 4;stroke-width:1.5}
+.lvchart .x{stroke:var(--ink3)}.lvtip{position:absolute;top:0;background:var(--ink);color:var(--card);font-size:12px;padding:6px 9px;border-radius:10px;
+pointer-events:none;white-space:nowrap;line-height:1.5;font-variant-numeric:tabular-nums}.lvtip i{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:5px}
+</style>"""
+
+LIVE_JS = r"""<script>
+(function(){var el=document.getElementById("lvchart");if(!el)return;var D=JSON.parse(el.dataset.j),NS="http://www.w3.org/2000/svg";
+var L=["#2a78d6","#eb6834","#1baf7a","#eda100","#e87ba4"],K=["#3987e5","#d95926","#199e70","#c98500","#d55181"],dk=matchMedia("(prefers-color-scheme: dark)");
+function col(i){return (dk.matches?K:L)[i]}
+function draw(){el.innerHTML="";var W=el.clientWidth,H=el.clientHeight,pl=40,pr=8,pt=8,pb=20,n=D.d.length,all=[];
+D.s.forEach(function(s){all=all.concat(s.v)});if(D.b)all=all.concat(D.b.v);var lo=Math.min.apply(0,all),hi=Math.max.apply(0,all);
+if(hi-lo<0.01){lo-=0.005;hi+=0.005}var X=function(i){return pl+(W-pl-pr)*i/(n-1)},Y=function(v){return pt+(H-pt-pb)*(hi-v)/(hi-lo)};
+var svg=document.createElementNS(NS,"svg");function E(t,a){var e=document.createElementNS(NS,t);for(var k in a)e.setAttribute(k,a[k]);svg.appendChild(e);return e}
+for(var g=0;g<=3;g++){var v=lo+(hi-lo)*g/3,y=Y(v);E("line",{x1:pl,x2:W-pr,y1:y,y2:y,"class":"g"});
+E("text",{x:pl-6,y:y+4,"text-anchor":"end","class":"gl"}).textContent=((v-1)*100>0?"+":"")+((v-1)*100).toFixed(1)+"%"}
+E("text",{x:pl,y:H-4,"class":"gl"}).textContent=D.d[0].slice(5).replace("-","/");
+E("text",{x:W-pr,y:H-4,"text-anchor":"end","class":"gl"}).textContent=D.d[n-1].slice(5).replace("-","/");
+function path(v){return v.map(function(x,i){return(i?"L":"M")+X(i).toFixed(1)+" "+Y(x).toFixed(1)}).join("")}
+if(D.b)E("path",{d:path(D.b.v),"class":"ln bench"});D.s.forEach(function(s){E("path",{d:path(s.v),"class":"ln",stroke:col(s.i)})});
+var cx=E("line",{y1:pt,y2:H-pb,"class":"x",visibility:"hidden"});el.appendChild(svg);var tip=document.createElement("div");tip.className="lvtip";tip.style.display="none";el.appendChild(tip);
+function mv(ev){var r=el.getBoundingClientRect(),i=Math.round((ev.clientX-r.left-pl)/(W-pl-pr)*(n-1));if(i<0||i>=n){out();return}
+cx.setAttribute("x1",X(i));cx.setAttribute("x2",X(i));cx.setAttribute("visibility","visible");
+var rows=D.s.map(function(s){return [s.v[i],'<i style="background:'+col(s.i)+'"></i>'+s.l]});if(D.b)rows.push([D.b.v[i],'<i style="border:1px dashed currentColor"></i>'+D.b.l]);
+rows.sort(function(a,b){return b[0]-a[0]});tip.innerHTML="<b>"+D.d[i]+"</b><br>"+rows.map(function(r){var p=(r[0]-1)*100;return r[1]+" "+(p>0?"+":"")+p.toFixed(1)+"%"}).join("<br>");
+tip.style.display="block";var tx=X(i)+12;if(tx+tip.offsetWidth>W)tx=X(i)-12-tip.offsetWidth;tip.style.left=Math.max(0,tx)+"px"}
+function out(){cx.setAttribute("visibility","hidden");tip.style.display="none"}
+el.onpointermove=mv;el.onpointerdown=mv;el.onpointerleave=out}
+draw();addEventListener("resize",draw);dk.addEventListener&&dk.addEventListener("change",draw)})();
 </script>"""
