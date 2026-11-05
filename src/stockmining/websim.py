@@ -319,7 +319,7 @@ def live_card(L: dict | None, base: str = "") -> str:
         body += (f'<h3 class="lvh">⭐ {h(P["label"])} · 지금 들고 있는 것</h3>'
                  + (f'<ul class="plain feed">{hold}</ul>' if hold else '<p class="lead">지금은 현금만 들고 있어요.</p>')
                  + (f'<h3 class="lvh">최근 매매</h3><ul class="plain feed">{feed}</ul>' if feed else ""))
-    return card("📒 지금부터 모의투자", body, count=f"{days}거래일째")
+    return card("📒 지금부터 모의투자", body, ("/reports?t=notes", "투자 노트"), f"{days}거래일째")
 
 
 def live_page(L: dict | None) -> str:
@@ -379,3 +379,67 @@ function out(){cx.setAttribute("visibility","hidden");tip.style.display="none"}
 el.onpointermove=mv;el.onpointerdown=mv;el.onpointerleave=out}
 draw();addEventListener("resize",draw);dk.addEventListener&&dk.addEventListener("change",draw)})();
 </script>"""
+
+
+# ---------------------------------------------------------------- 투자 노트 (/reports?t=notes)
+CONF_KO = {"high": ("믿을 만함", "good"), "mid": ("어느 정도", ""), "low": ("아직 이름", "bad")}
+
+
+def notes_page(L: dict | None, pb: dict | None, backtests: dict | None = None) -> str:
+    from . import live as LV
+    S = LV.stats(L, backtests) if L else None
+    if not S:
+        return card("📓 투자 노트", empty("📓", "지금부터 모의투자가 시작되면 여기에 배운 것이 쌓여요."))
+    out = []
+    ready = LV.readiness(S, L.get("pick", LV.PICK))
+    ok = sum(r["ok"] for r in ready)
+    pick = next((m for m in S["methods"] if m["pick"]), None)
+    lst = "".join(f'<li class="note"><span class="ck {"on" if r["ok"] else ""}">{"✓" if r["ok"] else ""}</span>'
+                  f'<span class="x">{h(r["label"])}<small>지금 {h(r["now"])}</small></span></li>' for r in ready)
+    out.append(card(f"직접 투자 준비도 {ok}/{len(ready)}",
+                    f'<p class="lead">⭐ {h(pick["label"] if pick else "")} 기준이에요. 다섯 개가 다 채워지기 전에는 큰돈을 넣지 않는 걸 권해요. '
+                    f'채워져도 처음엔 작게 시작하세요.</p><ul class="plain feed ready">{lst}</ul>'))
+    note = (pb or {}).get("note")
+    if note:
+        def items(xs):
+            return "".join(
+                f'<li class="note"><span class="x"><b>{h(x["title"])}</b> <em class="{CONF_KO.get(x["confidence"], ("", ""))[1]}">'
+                f'{CONF_KO.get(x["confidence"], (x["confidence"], ""))[0]}</em><small>{h(x["detail"])}</small>'
+                f'<small>근거: {h(x["evidence"])} · {x["n"]}건</small></span></li>' for x in xs)
+        body = f'<p class="lead"><b>{h(note["headline"])}</b></p>'
+        if note.get("my_rules"):
+            body += '<h3 class="lvh">내가 직접 투자할 때 지킬 것</h3><ol class="rules">' + "".join(
+                f'<li><b>{h(r["rule"])}</b><small>{h(r["why"])}</small></li>' for r in note["my_rules"]) + '</ol>'
+        if note.get("works"):
+            body += f'<h3 class="lvh">👍 잘 된 것</h3><ul class="plain feed">{items(note["works"])}</ul>'
+        if note.get("fails"):
+            body += f'<h3 class="lvh">👎 안 된 것</h3><ul class="plain feed">{items(note["fails"])}</ul>'
+        if note.get("watch"):
+            body += '<h3 class="lvh">👀 다음 주에 볼 것</h3><ul class="plain">' + "".join(f'<li class="note">{h(w)}</li>' for w in note["watch"]) + '</ul>'
+        if note.get("changes"):
+            body += '<h3 class="lvh">지난 노트에서 바뀐 것</h3><ul class="plain">' + "".join(f'<li class="note">{h(c)}</li>' for c in note["changes"]) + '</ul>'
+        ts = (pb or {}).get("note_ts") or ""
+        out.append(card("📓 투자 노트", body, count=f"{ts[5:7]}/{ts[8:10]} 업데이트" if ts else ""))
+    else:
+        out.append(card("📓 투자 노트", empty("🗓️", "첫 노트는 토요일 주간 학습 때 Claude가 써요. 매주 모의투자 결과를 보고 고쳐 써요.")))
+    if S["strategies"]:
+        rows = "".join(
+            f'<tr><td><b>{h(LB.strat(x["name"]))}</b><small class="sub">평균 {x["hold_days"]:.0f}일 보유 · '
+            + h(", ".join(f"{WHY_KO.get(k, k)} {v}" for k, v in x["exits"].items())) + '</small></td>'
+            f'<td>{x["n"]}</td><td>{pct(x["win_rate"], 0, False)}</td><td class="{tone(x["avg_pct"])}">{pct(x["avg_pct"], 2)}</td>'
+            f'<td>{pct(x["backtest_avg_pct"], 2) if x["backtest_avg_pct"] is not None else "-"}</td></tr>' for x in S["strategies"])
+        out.append(card("전략별 실전 성적", '<p class="lead">지금부터 모의투자에서 끝난 거래만 셌어요 (같은 거래는 한 번만). '
+                        '과거 백테스트 평균과 비슷하면 그 전략을 믿을 근거가 늘어나요.</p><div class="tscroll"><table class="t rank">'
+                        '<thead><tr><th>전략</th><th>거래</th><th>이긴 비율</th><th>평균</th><th>과거 평균</th></tr></thead>'
+                        f'<tbody>{rows}</tbody></table></div>'))
+    else:
+        out.append(card("전략별 실전 성적", empty("⏳", "아직 끝난 거래가 없어요. 첫 매도가 나오면 여기에 쌓여요.")))
+    return "".join(out) + NOTES_CSS
+
+
+NOTES_CSS = """<style>
+.ready .ck{flex:0 0 22px;height:22px;border-radius:50%;border:2px solid var(--line);display:inline-flex;align-items:center;justify-content:center;
+font-size:13px;font-weight:700;color:#fff}.ready .ck.on{background:var(--accent);border-color:var(--accent)}
+ol.rules{margin:4px 0 0;padding-left:22px}ol.rules li{margin:8px 0}ol.rules small{display:block;color:var(--ink3);font-size:12.5px}
+.lvh{font-size:15px;margin:18px 0 2px}
+</style>"""

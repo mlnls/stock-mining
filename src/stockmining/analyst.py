@@ -231,7 +231,7 @@ def evening_report(cfg, principles: str, ctx: dict) -> dict:
 2. proposals: 데이터가 뒷받침할 때만 0~2개. 근거가 약하면 빈 배열.
    - kind=principle: principle_text에 원칙.md에 추가할 한두 문장, rule_spec_json은 빈 문자열.
    - kind=rule: rule_spec_json에 아래 형식의 새 규칙 JSON 문자열(백테스트로 검증됨), principle_text는 빈 문자열.
-3. new_insights: 학습 일지에 남길 새 관찰·가설·교훈 0~3개. 오늘 데이터(신호, 페이퍼 결과, edge_summary, 시장)에서
+3. new_insights: 학습 일지에 남길 새 관찰·가설·교훈 0~3개. 오늘 데이터(신호, 페이퍼 결과, live_mock 실전 모의투자, edge_summary, 시장)에서
    '어떤 조건에서 돈이 벌리고/잃는가'에 대한 구체적이고 검증 가능한 문장으로. 이미 open_insights에 있는 내용은 반복하지 마세요.
    예) hypothesis: "VIX 20 이상일 때 qullamaggie_breakout 페이퍼 매매 손실이 몰린다 → 국면 필터 후보"
 4. insight_updates: open_insights 중 오늘 데이터로 확인(confirmed)·기각(rejected)할 수 있는 것만. 근거를 note에.
@@ -361,6 +361,62 @@ name은 기존 전략 이름과 겹치지 않는 snake_case로 하세요. 기존
 
 {DSL_DOC}""", cfg["claude"]["effort_research"], schema=RESEARCH_SCHEMA)
     return notes, json.loads(text)
+
+
+# ---------------------------------------------------------------------------- playbook (투자 노트)
+_NOTE = {
+    "type": "object",
+    "properties": {
+        "title": {"type": "string"},
+        "detail": {"type": "string"},
+        "evidence": {"type": "string"},
+        "n": {"type": "integer"},
+        "confidence": {"type": "string", "enum": ["low", "mid", "high"]},
+    },
+    "required": ["title", "detail", "evidence", "n", "confidence"],
+    "additionalProperties": False,
+}
+PLAYBOOK_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "headline": {"type": "string"},
+        "works": {"type": "array", "items": _NOTE},
+        "fails": {"type": "array", "items": _NOTE},
+        "my_rules": {"type": "array", "items": {
+            "type": "object", "properties": {"rule": {"type": "string"}, "why": {"type": "string"}},
+            "required": ["rule", "why"], "additionalProperties": False}},
+        "watch": {"type": "array", "items": {"type": "string"}},
+        "changes": {"type": "array", "items": {"type": "string"}},
+        **_LEARNING_PROPS,
+    },
+    "required": ["headline", "works", "fails", "my_rules", "watch", "changes", "new_insights", "insight_updates"],
+    "additionalProperties": False,
+}
+
+
+def playbook(cfg, principles: str, ctx: dict) -> dict:
+    """Weekly: turn what the forward mock investing (and the rest of the system) has shown into a note the user
+    can invest from later. Builds on the previous note instead of starting over."""
+    text = _call(cfg, _system(cfg, principles), f"""사용자는 지금 시스템의 실전 모의투자를 지켜보고 있고, 나중에 이 노트를 보고 직접 투자하려고 합니다.
+아래 데이터로 '투자 노트'를 이어서 고쳐 쓰세요.
+
+<data>
+{_dump(ctx)}
+</data>
+
+근거의 무게: live_mock(앞으로 진행 중인 실전 모의투자, 고칠 수 없는 기록) > replay(과거를 하루씩 다시 돌린 결과) > backtest.
+규칙
+- 모든 항목에 표본 수 n과 근거(evidence: 어떤 데이터의 어떤 숫자)를 적으세요. 숫자는 data에 있는 것만 쓰세요.
+- confidence: live_mock 끝난 거래 30건 이상이고 replay·backtest와 방향이 같으면 high, 10~29건이거나 replay·backtest만 있으면 mid,
+  그보다 적으면 low. live_mock이 적을 때는 '아직 이르다'고 분명히 쓰세요.
+- previous(지난주 노트)를 출발점으로 삼으세요. 근거가 쌓이면 confidence를 올리고, 반박되면 고치거나 빼고, 바꾼 것은 changes에 한 줄씩.
+- works: 수익이 났던 전략·조건·방식 (0~5개). fails: 손실이 났던 것 (0~5개).
+- my_rules: 사용자가 직접 투자할 때 따를 구체적 행동 규칙 3~7개 (언제 사고, 얼마나, 언제 팔고, 무엇을 피할지). 근거가 약한 규칙은 넣지 마세요.
+- watch: 다음 주에 확인할 것 1~3개.
+- headline: 지금까지의 결론 한 문장 (readiness 체크리스트 상황 포함).
+- new_insights / insight_updates: 학습 일지(open_insights)와 같은 규칙. live_mock으로 판정되는 가설은 판정하세요.
+쉬운 한국어로, 투자 용어는 풀어서 쓰세요.""", cfg["claude"]["effort_research"], schema=PLAYBOOK_SCHEMA)
+    return json.loads(text)
 
 
 # ---------------------------------------------------------------------------- ask

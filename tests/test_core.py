@@ -275,3 +275,61 @@ def test_live_ledger_moves_forward_only(tmp_path, monkeypatch):
     assert abs(st["bench"]["eq"][-1][1] - bench["close"].iloc[604] / bench["close"].iloc[600]) < 1e-6
     db = app.db
     assert "지금부터 모의투자" in web.route(app.cfg, db, "/sim", {}) and "지금부터 모의투자" in web.route(app.cfg, db, "/", {})
+
+
+def test_live_stats_and_readiness():
+    from stockmining import live as LV
+    st = {"start": "2026-11-05", "last": "2026-11-10", "pick": "best", "amount": 10_000_000,
+          "bench": {"name": "코스피", "base": 100.0, "eq": [["2026-11-05", 1.0], ["2026-11-10", 1.01]]},
+          "names": {}, "methods": {
+              "best": {"label": "분기 1등 따라가기", "slots": 5, "cash": 1.0, "pos": [],
+                       "eq": [["2026-11-05", 1.0], ["2026-11-06", 1.05], ["2026-11-10", 1.03]],
+                       "events": [["2026-11-06", "b", "A", "ml_rank", 10, None, ""],
+                                  ["2026-11-10", "s", "A", "ml_rank", 11, 9.5, "target", "2026-11-06", "bull"]]},
+              "equal": {"label": "전략 전부 섞기", "slots": 10, "cash": 1.0, "pos": [],
+                        "eq": [["2026-11-05", 1.0], ["2026-11-10", 0.99]],
+                        "events": [["2026-11-10", "s", "A", "ml_rank", 11, 9.5, "target", "2026-11-06", "bull"]]}}}
+    S = LV.stats(st, {"ml_rank": 1.7})
+    assert S["methods"][0]["id"] == "best" and S["methods"][0]["vs_bench_pct"] == 2.0
+    assert abs(S["methods"][0]["mdd_pct"] - (1 - 1.03 / 1.05) * 100) < 0.01
+    assert S["strategies"] == [{"name": "ml_rank", "n": 1, "win_rate": 100.0, "avg_pct": 9.5, "best_pct": 9.5,
+                                "worst_pct": 9.5, "hold_days": 4.0, "exits": {"target": 1},
+                                "by_regime": {"bull": [1, 9.5]}, "backtest_avg_pct": 1.7}]  # same trade counted once
+    ready = LV.readiness(S)
+    assert [r["ok"] for r in ready] == [False, False, True, True, True]
+    from stockmining import websim as WS
+    html = WS.notes_page(st, None, {"ml_rank": 1.7})
+    assert "직접 투자 준비도 3/5" in html and "전략별 실전 성적" in html
+
+
+def test_weekly_playbook_builds_on_previous_note(tmp_path, monkeypatch):
+    from stockmining import live as LV
+    from stockmining import analyst as AI
+    from stockmining.config import load_config
+    from stockmining.jobs import App
+    p = tmp_path / "c.yaml"
+    p.write_text(yaml.safe_dump({"market": "kr", "notifier": "console", "db_path": str(tmp_path / "k.db"),
+                                 "principles_path": str(tmp_path / "p.md")}))
+    app = App(load_config(p))
+    assert app.playbook() == []  # nothing before the mock investing starts
+    st = LV.new_state(app, "2026-11-05")
+    for m in st["methods"].values():
+        m["eq"].append(["2026-11-06", 1.01])
+    st["last"] = "2026-11-06"
+    LV.save(app.db, st)
+    seen = {}
+
+    def fake(cfg, principles, data):
+        seen["prev"] = data["previous"]
+        return {"headline": "아직 이르다", "works": [], "fails": [], "my_rules": [{"rule": "작게 시작", "why": "표본 부족"}],
+                "watch": [], "changes": ["첫 노트"], "new_insights": [], "insight_updates": []}
+    monkeypatch.setattr(AI, "playbook", fake)
+    monkeypatch.setattr(App, "claude_ready", property(lambda self: True))
+    lines = app.playbook()
+    assert "투자 노트 · 직접 투자 준비 " in lines[0] and "아직 이르다" in lines
+    app.playbook()
+    assert seen["prev"]["headline"] == "아직 이르다"  # second week starts from the first note
+    from stockmining import web
+    from stockmining import quotes as Q
+    monkeypatch.setattr(Q, "get", lambda codes: {})
+    assert "작게 시작" in web.route(app.cfg, app.db, "/reports", {"t": ["notes"]})

@@ -114,7 +114,7 @@ def update(app, ctx=None) -> dict | None:
                 if x and x[0] <= d:
                     S["cash"] += p["alloc"] * (1 + x[2] / 100)
                     S["events"].append([x[0].strftime("%Y-%m-%d"), "s", p["code"], p["strategy"], round(x[1], 4),
-                                        round(x[2], 2), x[3]])
+                                        round(x[2], 2), x[3], p["entry_date"], p.get("regime", "")])
                 else:
                     keep.append(p)
             S["pos"] = keep
@@ -132,7 +132,8 @@ def update(app, ctx=None) -> dict | None:
                 S["cash"] -= alloc
                 S["pos"].append({"code": t.code, "strategy": t.strategy, "signal_date": t.signal_date.strftime("%Y-%m-%d"),
                                  "entry_date": ds, "entry": float(t.entry), "stop": float(stop),
-                                 "target": float(target) if target is not None else None, "alloc": alloc, "last": float(t.entry)})
+                                 "target": float(target) if target is not None else None, "alloc": alloc, "last": float(t.entry),
+                                 "regime": t.regime})
                 S["events"].append([ds, "b", t.code, t.strategy, round(float(t.entry), 4), None, ""])
                 st["names"][t.code] = (info.get(t.code, {}) or {}).get("name") or t.code
             # 3) value at today's close
@@ -179,3 +180,92 @@ def slack_lines(st: dict | None, cur_fmt=lambda v: f"{v:,.0f}원") -> str:
     if b:
         out.append(f"• {st['bench']['name']} 그냥 들고 있기  {(b - 1) * 100:+.1f}%")
     return "\n".join(out)
+
+
+# ---------------------------------------------------------------- what the forward results teach (for the user)
+READY_DAYS, READY_TRADES, READY_MDD = 60, 30, 20.0
+
+
+def _mdd(v: list[float]) -> float:
+    a = np.array(v, dtype=float)
+    return float(-((a / np.maximum.accumulate(a)) - 1).min() * 100) if len(a) else 0.0
+
+
+def stats(st: dict | None, backtests: dict | None = None) -> dict | None:
+    """Per method (return, drawdown, vs index) and per strategy (closed trades, pooled over methods without
+    double counting): what has actually worked since the start day. ``backtests`` = {name: expectancy%}."""
+    if not st:
+        return None
+    b = [p[1] for p in st["bench"]["eq"]]
+    bench = (b[-1] - 1) * 100 if b else None
+    methods = []
+    for k, v in st["methods"].items():
+        eq = [p[1] for p in v["eq"]]
+        sells = [e for e in v["events"] if e[1] == "s"]
+        r = np.array([e[5] for e in sells], dtype=float)
+        methods.append({"id": k, "label": v["label"], "pick": k == st.get("pick"), "total_pct": round((eq[-1] - 1) * 100, 2),
+                        "mdd_pct": round(_mdd(eq), 2), "closed": len(sells), "open": len(v["pos"]),
+                        "win_rate": round(float((r > 0).mean() * 100), 1) if len(r) else None,
+                        "avg_pct": round(float(r.mean()), 2) if len(r) else None,
+                        "vs_bench_pct": round((eq[-1] - 1) * 100 - bench, 2) if bench is not None else None})
+    methods.sort(key=lambda m: -m["total_pct"])
+    seen, by = set(), {}
+    for v in st["methods"].values():
+        for e in v["events"]:
+            if e[1] != "s" or len(e) < 8:
+                continue
+            key = (e[2], e[3], e[7])
+            if key in seen:
+                continue
+            seen.add(key)
+            hold = (pd.Timestamp(e[0]) - pd.Timestamp(e[7])).days
+            by.setdefault(e[3], []).append({"ret": e[5], "why": e[6], "hold": hold, "regime": e[8] or "neutral"})
+    strategies = []
+    for name, ts in by.items():
+        r = np.array([t["ret"] for t in ts], dtype=float)
+        why, reg = {}, {}
+        for t in ts:
+            why[t["why"]] = why.get(t["why"], 0) + 1
+            reg.setdefault(t["regime"], []).append(t["ret"])
+        strategies.append({"name": name, "n": len(r), "win_rate": round(float((r > 0).mean() * 100), 1),
+                           "avg_pct": round(float(r.mean()), 2), "best_pct": round(float(r.max()), 1),
+                           "worst_pct": round(float(r.min()), 1), "hold_days": round(float(np.mean([t["hold"] for t in ts])), 1),
+                           "exits": why, "by_regime": {k: [len(x), round(float(np.mean(x)), 2)] for k, x in reg.items()},
+                           "backtest_avg_pct": (backtests or {}).get(name)})
+    strategies.sort(key=lambda s: -s["avg_pct"] * s["n"])
+    days = len(next(iter(st["methods"].values()))["eq"]) - 1
+    return {"start": st["start"], "last": st["last"], "days": days, "bench_name": st["bench"]["name"],
+            "bench_pct": round(bench, 2) if bench is not None else None, "methods": methods, "strategies": strategies}
+
+
+def readiness(S: dict | None, pick: str = PICK) -> list[dict]:
+    """Checklist before the user puts real money behind the starred method."""
+    if not S:
+        return []
+    m = next((x for x in S["methods"] if x["id"] == pick), None)
+    if not m:
+        return []
+    return [
+        {"label": f"{READY_DAYS}거래일(약 3개월) 이상 돌려 봤다", "ok": S["days"] >= READY_DAYS, "now": f"{S['days']}일"},
+        {"label": f"끝난 거래가 {READY_TRADES}번 이상이다 (운으로 보기 어려운 수)", "ok": m["closed"] >= READY_TRADES,
+         "now": f"{m['closed']}번"},
+        {"label": f"{S['bench_name']}를 그냥 들고 있는 것보다 많이 벌었다",
+         "ok": m["vs_bench_pct"] is not None and m["vs_bench_pct"] > 0 and S["days"] > 0,
+         "now": f"{m['vs_bench_pct']:+.1f}%p" if m["vs_bench_pct"] is not None else "-"},
+        {"label": f"고점 대비 가장 많이 빠진 게 {READY_MDD:.0f}% 이내다", "ok": m["mdd_pct"] <= READY_MDD and S["days"] > 0,
+         "now": f"-{m['mdd_pct']:.1f}%"},
+        {"label": "끝난 거래의 평균 수익이 비용을 빼고도 플러스다", "ok": (m["avg_pct"] or 0) > 0,
+         "now": f"{m['avg_pct']:+.2f}%" if m["avg_pct"] is not None else "-"},
+    ]
+
+
+def brief(st: dict | None, backtests: dict | None = None) -> dict | None:
+    """Compact view for Claude's prompts."""
+    S = stats(st, backtests)
+    if not S:
+        return None
+    P = st["methods"].get(st.get("pick"), {})
+    return {**S, "pick": st.get("pick"), "readiness": readiness(S),
+            "pick_holdings": [{k: p[k] for k in ("code", "strategy", "entry_date", "entry", "stop", "last")} for p in P.get("pos", [])],
+            "pick_recent": P.get("events", [])[-10:],
+            "note": "앞으로 진행 중인 실전 모의투자(결과를 보고 고칠 수 없는 기록). 표본이 적으면 결론을 미룰 것."}

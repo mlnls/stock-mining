@@ -22,8 +22,10 @@ from . import edgemap as EM
 from . import engine as E
 from . import journal as J
 from . import learner as L
+from . import live as LV
 from . import regime as RG
 from . import rules as R
+from . import websim as WS
 from .config import ROOT, Config
 from .db import DB
 from . import notify
@@ -197,9 +199,49 @@ class App:
         self.run_engine(day)
         self.live()
 
+    def backtest_expectancy(self) -> dict[str, float]:
+        out = {}
+        for s_ in self.db.strategies(("active", "muted")):
+            e = ((s_.get("backtest") or {}).get("full") or {}).get("expectancy_pct")
+            if e is not None:
+                out[s_["name"]] = e
+        return out
+
+    def playbook(self) -> list[str]:
+        """Weekly 투자 노트 (kv playbook + report). Deterministic stats always; Claude's note when available."""
+        live = LV.brief(LV.load(self.db), self.backtest_expectancy())
+        if not live:
+            return []
+        prev = json.loads(self.db.get("playbook") or "null")
+        note = None
+        if self.claude_ready and live["days"] > 0:
+            replay = WS.load(self.db)
+            data = {"live_mock": live, "previous": (prev or {}).get("note"),
+                    "replay": ({"start": replay["start"], "end": replay["end"], "bench": replay["bench"].get("metrics"),
+                                "methods": [{"label": m["label"], **m["metrics"]} for m in replay["methods"]],
+                                "last_quarters": replay["learn"][-2:]} if replay else None),
+                    "backtest_expectancy_pct": self.backtest_expectancy(),
+                    "edge_summary": self.db.get("edge_summary"), "open_insights": self.open_insights(),
+                    "confirmed_insights": self.db.query("SELECT text, note FROM insights WHERE status='confirmed' "
+                                                        "ORDER BY id DESC LIMIT 15")}
+            try:
+                note = AI.playbook(self.cfg.raw, self.principles(), data)
+            except Exception as e:
+                log.error("playbook failed: %s\n%s", e, traceback.format_exc())
+        now = self.now().isoformat(timespec="seconds")
+        pb = {"ts": now, "stats": live, "note": note or (prev or {}).get("note"), "note_ts": now if note else (prev or {}).get("note_ts")}
+        self.db.set("playbook", json.dumps(pb, ensure_ascii=False, default=str))
+        ok = sum(r["ok"] for r in live["readiness"])
+        out = [f"\n📓 투자 노트 · 직접 투자 준비 {ok}/{len(live['readiness'])}"]
+        if note:
+            self.db.add_report("playbook", note["headline"], now, {"note": note})
+            out.append(note["headline"])
+            out += [f"• {c}" for c in note["changes"][:3]]
+            out += self.save_learning("playbook", note)
+        return out
+
     def live(self, ctx=None, notify: bool = True) -> dict | None:
         """Forward mock investing (10M per method from its start day, see live.py)."""
-        from . import live as LV
         try:
             st = LV.update(self, ctx)
         except Exception as e:
@@ -264,6 +306,7 @@ class App:
             "profile": cfg["profile"],
             "edge_summary": self.db.get("edge_summary") or "아직 없음(주간 배치 후 생성)",
             "open_insights": self.open_insights(),
+            "live_mock": LV.brief(LV.load(self.db), self.backtest_expectancy()),
         }
         self.db.set("last_evening_ctx", json.dumps(ctx, ensure_ascii=False, default=str))
 
@@ -533,6 +576,9 @@ class App:
             except Exception as e:
                 log.error("research failed: %s\n%s", e, traceback.format_exc())
                 lines.append(f"리서치 실패: {e}")
+
+        # 4b) 투자 노트: what the forward mock investing has taught so far, for the user's own investing later
+        lines += self.playbook()
 
         # 5) leaderboard
         regime = self.current_regime()

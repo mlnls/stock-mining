@@ -27,6 +27,8 @@ HELP = """명령어 (코드 = 티커, 예: NVDA). Slack에서는 봇 DM에 '/' �
 /strats                     전략 현황
 /insights                   학습 일지 (관찰·가설·교훈과 검증 결과)
 /edge                       엣지 맵 (전략별로 돈이 벌리고 잃는 조건)
+/mock                       지금부터 모의투자 순위 (방식별 가상 1000만원)
+/playbook                   투자 노트 (모의투자로 배운 것 + 직접 투자 준비도)
 /report                     최근 리포트 다시 보기
 /ask 질문                   Claude에게 질문 (웹 검색 포함)
 /hold                       내 자산(장기 보유) 목록
@@ -148,6 +150,24 @@ def handle(app: App, text: str) -> str:
             icon = {"open": "⏳", "confirmed": "✅", "rejected": "❌"}
             return "\n".join(f"{icon[r['status']]} #{r['id']} [{r['kind']}] {r['text']}"
                              + (f"\n   → {r['note']}" if r["note"] else "") for r in rows) or "학습 일지 비어 있음"
+        if cmd == "/mock":
+            from . import live as LV
+            return LV.slack_lines(LV.load(app.db)) or "모의투자가 아직 시작 전이에요"
+        if cmd == "/playbook":
+            from . import live as LV
+            S = LV.stats(LV.load(app.db), app.backtest_expectancy())
+            if not S:
+                return "모의투자가 아직 시작 전이에요"
+            ready = LV.readiness(S)
+            out = [f"📓 직접 투자 준비도 {sum(r['ok'] for r in ready)}/{len(ready)}"]
+            out += [f"{'✅' if r['ok'] else '⬜'} {r['label']} (지금 {r['now']})" for r in ready]
+            note = (json.loads(app.db.get("playbook") or "null") or {}).get("note")
+            if note:
+                out += ["", f"*{note['headline']}*", "내가 직접 투자할 때 지킬 것"]
+                out += [f"{i}. {r['rule']} — {r['why']}" for i, r in enumerate(note["my_rules"], 1)]
+            else:
+                out.append("\n첫 투자 노트는 토요일 주간 학습 때 생겨요")
+            return "\n".join(out)
         if cmd == "/edge":
             return app.db.get("edge_summary") or "엣지 맵 없음 (주간 배치 후 생성)"
         if cmd == "/report":

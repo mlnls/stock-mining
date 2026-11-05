@@ -31,7 +31,7 @@ from .webui import (avatar, card, chart, chips, doc_html, empty, explain, explai
 
 log = logging.getLogger(__name__)
 STATUS = {"active": "사용 중", "muted": "쉬는 중", "retired": "퇴역"}
-KIND = {"evening": ("📊", "저녁 리포트"), "morning": ("☀️", "아침 브리핑"), "weekly": ("🧠", "주간 학습"),
+KIND = {"playbook": ("📓", "투자 노트"), "evening": ("📊", "저녁 리포트"), "morning": ("☀️", "아침 브리핑"), "weekly": ("🧠", "주간 학습"),
         "ask": ("💬", "질문 답변"), "weekly_research": ("🔎", "주간 리서치")}
 
 
@@ -400,7 +400,8 @@ def stock(c: Ctx, code: str) -> tuple[str, str, list[str]]:
 
 def reports(c: Ctx, tab: str) -> tuple[str, str, list[str]]:
     out = [chips([("/reports", "리포트", tab == "list"), ("/reports?t=learn", "학습 일지", tab == "learn"),
-                  ("/reports?t=props", "승인 대기", tab == "props"), ("/reports?t=edge", "엣지 맵", tab == "edge")])]
+                  ("/reports?t=props", "승인 대기", tab == "props"), ("/reports?t=edge", "엣지 맵", tab == "edge"),
+                  ("/reports?t=notes", "투자 노트", tab == "notes")])]
     if tab == "learn":
         status_ko = {"open": ("확인 중", ""), "confirmed": ("맞았음", "good"), "rejected": ("틀렸음", "bad")}
         ins = c.db.query("SELECT * FROM insights ORDER BY id DESC LIMIT 50")
@@ -414,6 +415,13 @@ def reports(c: Ctx, tab: str) -> tuple[str, str, list[str]]:
         lst = "".join(f'<li class="note"><b>#{p["id"]} {h(p["title"])}</b><small>{h((p["rationale"] or "")[:500])}</small>'
                       f'<small>슬랙에서 <code>approve {p["id"]}</code> 또는 <code>reject {p["id"]}</code></small></li>' for p in props)
         out.append(card("승인 대기 제안", f'<ul class="plain">{lst}</ul>' if props else empty("✅", "승인할 제안이 없어요.")))
+    elif tab == "notes":
+        bt = {}
+        for s_ in c.db.strategies(("active", "muted")):
+            e = ((s_.get("backtest") or {}).get("full") or {}).get("expectancy_pct")
+            if e is not None:
+                bt[s_["name"]] = e
+        out.append(WS.notes_page(LV.load(c.db), json.loads(c.db.get("playbook") or "null"), bt))
     elif tab == "edge":
         edge = c.db.get("edge_summary")
         out.append(card("엣지 맵", doc_html(DF.parse_text(edge)) if edge else empty("🗺️", "토요일 주간 학습 뒤에 생겨요.")))
