@@ -82,6 +82,13 @@ fi
 chown -R stockmining:stockmining "$DATA"
 chmod 0640 "$ETC"/*; chgrp stockmining "$ETC"/*
 
+# true (and remembers the new state) when a market's rule files differ from the last deploy
+rules_changed() {
+  local sum; sum=$(cat "$1"/*.yaml 2>/dev/null | sha256sum | cut -d' ' -f1)
+  [ "$(cat "$DATA/.rules-$2.sha" 2>/dev/null)" = "$sum" ] && return 1
+  echo "$sum" > "$DATA/.rules-$2.sha"; echo "$2 rules changed → backtest queued"
+}
+
 # 5) systemd units
 install -m 0755 "$APP/deploy/backup.sh" /usr/local/bin/stockmining-backup
 cp "$APP"/deploy/systemd/*.service "$APP"/deploy/systemd/*.timer /etc/systemd/system/
@@ -96,6 +103,8 @@ systemctl enable --now stockmining-morning.timer stockmining-evening.timer stock
   stockmining-kr-morning.timer stockmining-kr-evening.timer stockmining-kr-weekly.timer
 systemctl enable stockmining-bot.service
 systemctl restart stockmining-bot.service
+# the dashboard reads the new code only after a restart (also when WEB_DOMAIN isn't passed this time)
+if systemctl is-enabled --quiet stockmining-web.service 2>/dev/null; then systemctl restart stockmining-web.service; fi
 
 # 5b) web dashboard behind the host's existing Caddy (docker) — only when WEB_DOMAIN is given
 if [ -n "${WEB_DOMAIN:-}" ]; then
@@ -127,15 +136,15 @@ fi
 if [ ! -s "$DATA/stockmining.db" ] || ! sqlite3 "$DATA/stockmining.db" "select 1 from prices limit 1" | grep -q 1; then
   systemctl start --no-block stockmining@init.service
   echo "initial backfill started: journalctl -u stockmining@init -f"
-else
-  # pick up new/changed built-in strategies
+elif rules_changed "$APP/strategies" us; then
+  # pick up new/changed built-in strategies (skipped when no rule file changed: a full run takes ~30 min)
   systemctl start --no-block stockmining@backtest.service
 fi
 # KR instance: first run backfills ~1000 KRX stocks (waits for the US job via the shared lock)
 if [ ! -s "$DATA/stockmining_kr.db" ] || ! sqlite3 "$DATA/stockmining_kr.db" "select 1 from prices limit 1" 2>/dev/null | grep -q 1; then
   systemctl start --no-block stockmining-kr@init.service
   echo "KR initial backfill queued: journalctl -u stockmining-kr@init -f"
-else
+elif rules_changed "$APP/strategies/kr" kr; then
   systemctl start --no-block stockmining-kr@backtest.service
 fi
 echo "install done"
