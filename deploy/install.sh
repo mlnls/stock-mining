@@ -65,6 +65,9 @@ if [ -n "$LOCAL" ]; then
   fi
   touch "$ETC/env"
   grep -q '^STOCKMINING_CONFIG_KR=' "$ETC/env" || echo "STOCKMINING_CONFIG_KR=/etc/stockmining/config-kr.yaml" >> "$ETC/env"
+  # dashboard link for Slack messages: remembered in web.env from the deploy that set up the domain
+  WD="${WEB_DOMAIN:-$(sed -n 's/^WEB_DOMAIN=//p' "$ETC/web.env" 2>/dev/null)}"
+  if [ -n "$WD" ]; then sed -i '/^STOCKMINING_WEB_URL=/d' "$ETC/env"; echo "STOCKMINING_WEB_URL=https://$WD" >> "$ETC/env"; fi
 else
   install -m 0755 "$APP/deploy/fetch-secrets.sh" /usr/local/bin/stockmining-fetch-secrets
   /usr/local/bin/stockmining-fetch-secrets
@@ -116,7 +119,7 @@ if [ -n "${WEB_DOMAIN:-}" ]; then
   grep -q '^WEB_PASSWORD=' "$ETC/web.env" || echo "WEB_PASSWORD=$(openssl rand -base64 18 | tr -d '/+=')" >> "$ETC/web.env"
   sed -i '/^WEB_HOST=/d;/^WEB_PORT=/d' "$ETC/web.env"
   printf 'WEB_HOST=%s\nWEB_PORT=8787\n' "$GW" >> "$ETC/web.env"
-  sed -i '/^STOCKMINING_WEB_URL=/d' "$ETC/env"; echo "STOCKMINING_WEB_URL=https://$WEB_DOMAIN" >> "$ETC/env"  # links in Slack
+  sed -i '/^WEB_DOMAIN=/d' "$ETC/web.env"; echo "WEB_DOMAIN=$WEB_DOMAIN" >> "$ETC/web.env"  # reused for Slack links
   chmod 0640 "$ETC/web.env"; chgrp stockmining "$ETC/web.env"
   systemctl enable stockmining-web.service
   systemctl restart stockmining-web.service

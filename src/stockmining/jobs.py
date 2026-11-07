@@ -225,7 +225,7 @@ class App:
                 line = f"📈 *모의투자* {live['days']}일째 · ⭐ {pick['label']} *{pick['total_pct']:+.1f}%*"
                 if live.get("bench_pct") is not None:
                     line += f" · {live['bench_name']} {live['bench_pct']:+.1f}%"
-                if top["id"] != pick["id"]:
+                if top["id"] != pick["id"] and top["total_pct"] > pick["total_pct"]:
                     line += f"\n   지금 1등: {top['label']} {top['total_pct']:+.1f}%"
                 out += ["", line]
 
@@ -266,9 +266,9 @@ class App:
                 ok = sum(1 for p in rules if p["passed"])
                 out.append(f"• 새 규칙 후보 {len(rules)}개 시험 → 통과 {ok}개" + (" (모두 탈락)" if not ok else ""))
             for l in lessons[:2]:
-                t = l["text"]
+                t = _re.split(r"(?<=[.다요])\s", l["text"].strip(), maxsplit=1)[0]  # first sentence
                 out.append(f"• {'배운 것' if l['kind'] == 'lesson' else '확인할 가설' if l['kind'] == 'hypothesis' else '관찰'}: "
-                           + (t if len(t) <= 90 else t[:88] + "…"))
+                           + (t if len(t) <= 110 else t[:108] + "…"))
 
         regime = self.current_regime()
         stats = L.strategy_stats(self.db, self.db.strategies(("active", "muted")), regime, self.cfg.raw)

@@ -184,10 +184,9 @@ def slack_lines(st: dict | None, cur_fmt=lambda v: f"{v:,.0f}원") -> str:
             nm = st["names"].get(e[2], e[2])
             out.append(f"   {'🟢 샀어요' if e[1] == 'b' else '🔴 팔았어요'} {nm}" + (f" {e[5]:+.1f}%" if e[1] == "s" else ""))
     b = st["bench"]["eq"][-1][1] if st["bench"]["eq"] else None
-    rank = " · ".join(f"{i}. {'⭐' if r['pick'] else ''}{r['label']} {(r['eq'] - 1) * 100:+.1f}%" for i, r in enumerate(rows, 1))
-    out += ["", "순위  " + rank]
+    out += ["", "*순위*"] + [f"{i}. {r['label']}{' ⭐' if r['pick'] else ''}  {(r['eq'] - 1) * 100:+.1f}%" for i, r in enumerate(rows, 1)]
     if b:
-        out.append(f"비교  {st['bench']['name']} 그냥 들고 있기 {(b - 1) * 100:+.1f}%")
+        out.append(f"(비교) {st['bench']['name']} 그냥 들고 있기  {(b - 1) * 100:+.1f}%")
     return "\n".join(out)
 
 
