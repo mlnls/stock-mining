@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import date, datetime, time as dtime
 
 import numpy as np
 import pandas as pd
@@ -57,6 +58,13 @@ def _specs(app) -> dict[str, dict]:
         spec = R.resolve(R.validate(yaml.safe_load(f.read_text(encoding="utf-8"))))
         out[spec["name"]] = spec
     return out
+
+
+def _news_at(app, code: str, day: str) -> str:
+    """News label known before that day's open (collected the previous evening or earlier)."""
+    from . import news as NW
+    asof = datetime.combine(date.fromisoformat(day), dtime(8, 0), tzinfo=app.tz).isoformat(timespec="seconds")
+    return NW.snapshot(app.db, code, asof)["label"]
 
 
 def _exit(df: pd.DataFrame, spec: dict, p: dict, costs: dict):
@@ -114,7 +122,7 @@ def update(app, ctx=None) -> dict | None:
                 if x and x[0] <= d:
                     S["cash"] += p["alloc"] * (1 + x[2] / 100)
                     S["events"].append([x[0].strftime("%Y-%m-%d"), "s", p["code"], p["strategy"], round(x[1], 4),
-                                        round(x[2], 2), x[3], p["entry_date"], p.get("regime", "")])
+                                        round(x[2], 2), x[3], p["entry_date"], p.get("regime", ""), p.get("news", "unknown")])
                 else:
                     keep.append(p)
             S["pos"] = keep
@@ -133,7 +141,7 @@ def update(app, ctx=None) -> dict | None:
                 S["pos"].append({"code": t.code, "strategy": t.strategy, "signal_date": t.signal_date.strftime("%Y-%m-%d"),
                                  "entry_date": ds, "entry": float(t.entry), "stop": float(stop),
                                  "target": float(target) if target is not None else None, "alloc": alloc, "last": float(t.entry),
-                                 "regime": t.regime})
+                                 "regime": t.regime, "news": _news_at(app, t.code, ds)})
                 S["events"].append([ds, "b", t.code, t.strategy, round(float(t.entry), 4), None, ""])
                 st["names"][t.code] = (info.get(t.code, {}) or {}).get("name") or t.code
             # 3) value at today's close
@@ -219,23 +227,33 @@ def stats(st: dict | None, backtests: dict | None = None) -> dict | None:
                 continue
             seen.add(key)
             hold = (pd.Timestamp(e[0]) - pd.Timestamp(e[7])).days
-            by.setdefault(e[3], []).append({"ret": e[5], "why": e[6], "hold": hold, "regime": e[8] or "neutral"})
+            by.setdefault(e[3], []).append({"ret": e[5], "why": e[6], "hold": hold, "regime": e[8] or "neutral",
+                                            "news": e[9] if len(e) > 9 else "unknown"})
     strategies = []
     for name, ts in by.items():
         r = np.array([t["ret"] for t in ts], dtype=float)
-        why, reg = {}, {}
+        why, reg, nws = {}, {}, {}
         for t in ts:
             why[t["why"]] = why.get(t["why"], 0) + 1
             reg.setdefault(t["regime"], []).append(t["ret"])
+            nws.setdefault(t["news"], []).append(t["ret"])
         strategies.append({"name": name, "n": len(r), "win_rate": round(float((r > 0).mean() * 100), 1),
                            "avg_pct": round(float(r.mean()), 2), "best_pct": round(float(r.max()), 1),
                            "worst_pct": round(float(r.min()), 1), "hold_days": round(float(np.mean([t["hold"] for t in ts])), 1),
                            "exits": why, "by_regime": {k: [len(x), round(float(np.mean(x)), 2)] for k, x in reg.items()},
+                           "by_news": {k: [len(x), round(float(np.mean(x)), 2)] for k, x in nws.items()},
                            "backtest_avg_pct": (backtests or {}).get(name)})
     strategies.sort(key=lambda s: -s["avg_pct"] * s["n"])
+    news = {}  # does the news state at the time of buying tell anything? (all strategies pooled)
+    for ts in by.values():
+        for t in ts:
+            news.setdefault(t["news"], []).append(t["ret"])
+    by_news = {k: {"n": len(x), "avg_pct": round(float(np.mean(x)), 2), "win_rate": round(float((np.array(x) > 0).mean() * 100), 1)}
+               for k, x in news.items()}
     days = len(next(iter(st["methods"].values()))["eq"]) - 1
     return {"start": st["start"], "last": st["last"], "days": days, "bench_name": st["bench"]["name"],
-            "bench_pct": round(bench, 2) if bench is not None else None, "methods": methods, "strategies": strategies}
+            "bench_pct": round(bench, 2) if bench is not None else None, "methods": methods, "strategies": strategies,
+            "by_news": by_news}
 
 
 def readiness(S: dict | None, pick: str = PICK) -> list[dict]:

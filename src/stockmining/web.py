@@ -23,11 +23,12 @@ from . import journal as J
 from . import labels as LB
 from . import quotes as Q
 from . import live as LV
+from . import news as NW
 from . import websim as WS
 from .config import Config
 from .db import DB
 from .webui import (avatar, card, chart, chips, doc_html, empty, explain, explain_exit, fold_row, h, inline, kst, kv,
-                    link_row, live, market_state, money, page, pct, report_doc, shares, tone)
+                    link_row, live, market_state, money, news_list, page, pct, report_doc, shares, tone)
 
 log = logging.getLogger(__name__)
 STATUS = {"active": "사용 중", "muted": "쉬는 중", "retired": "퇴역"}
@@ -174,6 +175,12 @@ def home(c: Ctx) -> tuple[str, str, list[str]]:
     body.append(card("내일 살 후보", lst or empty("😴", "내일 살 종목이 없어요."), ("/picks", "자세히"),
                      f"{len(recs)}개" if recs else ""))
 
+    mk = NW.recent(c.db, "", 30)
+    if mk:
+        mood = (c.evening.get("news") or {}).get("market_mood") or {}
+        lead = (f'<p class="lead">어제 저녁 기준 시장 뉴스 분위기: <b>{h(NW.LABEL_KO.get(mood.get("label"), "-"))}</b>'
+                + (f' (평균 {mood["sent"]:+.1f}, −2~+2)' if mood.get("sent") is not None else "") + '</p>') if mood else ""
+        body.append(card("📰 시장 뉴스", lead + news_list(mk, 6), ("/news", "더 보기")))
     body.append(WS.live_home(LV.load(c.db)))
     body.append(WS.home_card(WS.load(c.db)))
 
@@ -227,6 +234,7 @@ def picks(c: Ctx) -> tuple[str, str, list[str]]:
     qs = Q.get([r["code"] for r in recs])
     cap = c.cfg["account"].get("capital") or 0
     earn = {r["code"]: r.get("next_earnings") for r in c.evening.get("recommendations", [])}
+    news_of = {r["code"]: r.get("news") for r in c.evening.get("recommendations", [])}
     lst = ""
     for i, r in enumerate(recs):
         q = qs.get(r["code"])
@@ -244,6 +252,12 @@ def picks(c: Ctx) -> tuple[str, str, list[str]]:
                   + (f" <small>내 돈의 {risk / cap:.0%}</small>" if risk and cap else ""))]
         if earn.get(r["code"]):
             items.append(("다음 실적 발표", h(earn[r["code"]])))
+        nw = news_of.get(r["code"]) or {}
+        if nw.get("label") == "risk":
+            items.append(("뉴스", '<span class="down">⚠️ ' + h(", ".join(NW.TAG_KO.get(t, t) for t in nw["tags"] if t in NW.NEG_TAGS))
+                          + " 소식 · 확인 전엔 사지 마세요</span>"))
+        elif nw.get("n"):
+            items.append(("뉴스", f'최근 3일 {nw["n"]}건 · {NW.LABEL_KO.get(nw["label"], "")}'))
         flag = f'<div class="alert">⛔ 아침 브리핑 보류 권고: {h(r["flagged"])}</div>' if r["flagged"] else ""
         body = (flag + chart(c.series(r["code"], 120), c.cur, {"stop": stop, "entry": price}) + kv(items)
                 + f'<p class="hint">지정가로 사고, 크게 갭상승하면 쫓아가지 마세요. 사면 슬랙에 <code>buy {h(r["code"])} 가격 수량</code>'
@@ -379,6 +393,10 @@ def stock(c: Ctx, code: str) -> tuple[str, str, list[str]]:
         lines["stop"] = rec[0]["stop"]
     if pts:
         out.append(card("최근 1년", chart(pts, cur, lines, 220)))
+    nws = NW.recent(c.db, code)
+    if nws:
+        out.append(card("📰 최근 뉴스·공시", '<p class="lead">▲ 주가에 좋은 소식, ▼ 나쁜 소식 (Claude가 제목만 보고 판단). '
+                        '아직 성과로 검증된 신호는 아니에요.</p>' + news_list(nws), count=f"{len(nws)}건"))
     if hold:
         out.append(card("내가 가진 만큼", kv([
             ("수량", shares(hold["qty"])), ("평균 산 가격", money(hold["avg_price"], cur)),
@@ -484,6 +502,10 @@ def route(cfg: Config, db: DB, path: str, query: dict, kr: tuple | None = None) 
         if base and not Q.is_kr(parts[1]):  # US ticker reached from a KR page (e.g. 내 자산)
             c = Ctx(cfg, db, markets=markets)
         (title, body, codes), tab, back = stock(c, parts[1]), "", "javascript:history.back()"
+    elif parts == ["news"]:
+        mk = NW.recent(c.db, "", 60)
+        title, codes, tab = "시장 뉴스" + (" · 국내" if base else ""), [], "/"
+        body = card("📰 시장 뉴스", news_list(mk, 60) or empty("📰", "저녁 배치가 한 번 돌면 뉴스가 쌓여요."), count=f"{len(mk)}건")
     elif parts == ["sim"]:
         title, body, codes, tab = ("타임머신 모의투자" + (" · 국내" if base else ""), WS.live_page(LV.load(c.db)) + WS.page_body(WS.load(c.db)), [], "/sim")
     elif parts == ["reports"]:

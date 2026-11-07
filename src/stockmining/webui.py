@@ -268,6 +268,8 @@ display:flex;justify-content:center;padding:6px 0 calc(6px + env(safe-area-inset
 nav.tabs a{flex:1;max-width:120px;display:flex;flex-direction:column;align-items:center;gap:2px;font-size:11.5px;font-weight:600;color:var(--ink3)}
 nav.tabs svg{width:24px;height:24px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linejoin:round;stroke-linecap:round}
 nav.tabs a.on{color:var(--ink)}
+.news li.note{display:flex;gap:10px;align-items:baseline;padding:9px 0}.news .d{flex:0 0 14px;font-size:12px;color:var(--ink3)}
+.news .x{flex:1;min-width:0;overflow-wrap:anywhere}.news small{display:block;color:var(--ink3);font-size:12.5px}.news a{color:inherit;text-decoration:none}
 .card,.hero{background:var(--card);border-radius:20px;padding:20px;margin:12px 0}
 .hero small{color:var(--ink3);font-size:13px}.hero .lbl{display:block;color:var(--ink2);font-size:15px;margin-top:6px}
 .big{display:block;font-size:34px;font-weight:700;letter-spacing:-.02em;margin:2px 0 4px;font-variant-numeric:tabular-nums}
@@ -407,3 +409,24 @@ document.querySelectorAll("details").forEach(function(d){d.addEventListener("tog
 })();
 </script>
 </body></html>"""
+
+
+def news_list(rows: list[dict], limit: int = 10) -> str:
+    """Headlines with a sentiment mark and event tags (rows from the news table)."""
+    import json as _json
+    from . import news as NW
+    items = ""
+    for r in rows[:limit]:
+        sv = r.get("sentiment")
+        dot = "" if sv is None else ("up" if sv > 0 else "down" if sv < 0 else "")
+        mark = "" if sv is None else ("▲" if sv > 0 else "▼" if sv < 0 else "·")
+        tags = [NW.TAG_KO.get(t, t) for t in _json.loads(r.get("tags") or "[]") if t != "macro"]
+        warn = any(t in NW.NEG_TAGS for t in _json.loads(r.get("tags") or "[]"))
+        title = h(r["title"])
+        if (r.get("link") or "").startswith("https://"):
+            title = f'<a href="{h(r["link"])}" target="_blank" rel="noopener noreferrer">{title}</a>'
+        items += (f'<li class="note"><span class="d {dot}">{mark}</span><span class="x">{"⚠️ " if warn else ""}{title}'
+                  f'<small>{h(r.get("source") or "")}{" · " if r.get("source") else ""}{h(kst(r.get("published") or r["seen"], "%-m/%-d %H:%M"))}'
+                  + (" · " + h(", ".join(tags)) if tags else "") + ("" if r.get("kind") != "disclosure" else " · 공시")
+                  + '</small></span></li>')
+    return f'<ul class="plain feed news">{items}</ul>' if items else ""

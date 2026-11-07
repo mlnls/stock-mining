@@ -434,6 +434,18 @@ def notes_page(L: dict | None, pb: dict | None, backtests: dict | None = None) -
                         f'<tbody>{rows}</tbody></table></div>'))
     else:
         out.append(card("전략별 실전 성적", empty("⏳", "아직 끝난 거래가 없어요. 첫 매도가 나오면 여기에 쌓여요.")))
+    from . import news as NW
+    bn = S.get("by_news") or {}
+    if bn:
+        rows = "".join(f'<tr><td>{h(NW.LABEL_KO.get(k, k))}</td><td>{v["n"]}</td><td>{pct(v["win_rate"], 0, False)}</td>'
+                       f'<td class="{tone(v["avg_pct"])}">{pct(v["avg_pct"], 2)}</td></tr>'
+                       for k, v in sorted(bn.items(), key=lambda kv: -kv[1]["n"]))
+        body = ('<p class="lead">살 때 그 종목의 뉴스 상태별로 끝난 거래를 나눠 봤어요. 거래가 쌓여서 차이가 꾸준히 보이면, '
+                '그때 뉴스를 매수 조건에 넣을지 판단해요.</p><div class="tscroll"><table class="t rank"><thead><tr><th>살 때 뉴스</th>'
+                f'<th>거래</th><th>이긴 비율</th><th>평균</th></tr></thead><tbody>{rows}</tbody></table></div>')
+    else:
+        body = empty("📰", "살 때의 뉴스 상태와 결과를 비교해서 여기에 보여줘요. 끝난 거래가 생기면 채워져요.")
+    out.append(card("📰 뉴스가 도움이 됐나", body))
     return "".join(out) + NOTES_CSS
 
 

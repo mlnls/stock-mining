@@ -23,6 +23,7 @@ from . import engine as E
 from . import journal as J
 from . import learner as L
 from . import live as LV
+from . import news as NW
 from . import regime as RG
 from . import rules as R
 from . import websim as WS
@@ -199,6 +200,27 @@ class App:
         self.run_engine(day)
         self.live()
 
+    def collect_news(self, day: str, recs, signals, positions) -> dict:
+        """Evening news/disclosure collection for tomorrow's candidates, holdings, the mock ledger's positions and
+        the strongest signals; returns point-in-time snapshots."""
+        codes = [] if recs.empty else list(recs["code"])
+        codes += list(positions)
+        st = LV.load(self.db)
+        if st:
+            codes += [p["code"] for m in st["methods"].values() for p in m["pos"]]
+        if not signals.empty:
+            codes += list(signals.sort_values("score", ascending=False)["code"].drop_duplicates())
+        out = {"market": None, "stocks": {}}
+        try:
+            res = NW.collect(self, codes, day)
+            now = self.now().isoformat(timespec="seconds")
+            out["market"] = res["mood"]
+            for c in dict.fromkeys(codes):
+                out["stocks"][c] = NW.snapshot(self.db, c, now)
+        except Exception as e:
+            log.error("news collection failed: %s", e, exc_info=True)
+        return out
+
     def backtest_expectancy(self) -> dict[str, float]:
         out = {}
         for s_ in self.db.strategies(("active", "muted")):
@@ -287,12 +309,14 @@ class App:
             for code, p in positions.items():
                 p["next_earnings"] = ER.next_earnings(self.db, code, day)
 
+        news = self.collect_news(day, recs, signals, positions)
         names = {c: i.get("name") for c, i in info.items()}
         rec_list = [] if recs.empty else [
             {"code": r.code, "name": names.get(r.code), "strategy": r.strategy, "entry_ref_close": r.close,
              "stop": round(r.stop, 2), "target": None if pd.isna(r.target) else round(r.target, 2),
              "shares": r.shares, "risk_amount": round((r.close - r.stop) * r.shares, 2),
-             "currency": cfg["currency"], "next_earnings": getattr(r, "next_earnings", None)}
+             "currency": cfg["currency"], "next_earnings": getattr(r, "next_earnings", None),
+             "news": news["stocks"].get(r.code)}
             for r in recs.itertuples()]
         ctx = {
             "date": day, "market": market, "learner_changes": changes,
@@ -307,6 +331,8 @@ class App:
             "edge_summary": self.db.get("edge_summary") or "아직 없음(주간 배치 후 생성)",
             "open_insights": self.open_insights(),
             "live_mock": LV.brief(LV.load(self.db), self.backtest_expectancy()),
+            "news": {"market_mood": news["market"], "holdings": {c: news["stocks"].get(c) for c in positions},
+                     "note": "뉴스는 수집 시점 기준. 아직 성과로 검증되지 않았으니 위험 공시(risk) 경고 위주로 쓰고, 좋은 뉴스로 매수를 권하지 말 것."},
         }
         self.db.set("last_evening_ctx", json.dumps(ctx, ensure_ascii=False, default=str))
 
@@ -355,6 +381,12 @@ class App:
             ]
             if r.get("next_earnings"):
                 lines.append(f"• 다음 실적 발표  {r['next_earnings']}")
+            nw = r.get("news") or {}
+            if nw.get("label") == "risk":
+                lines.append("• ⚠️ 뉴스  " + ", ".join(NW.TAG_KO.get(t, t) for t in nw["tags"] if t in NW.NEG_TAGS)
+                             + " 관련 소식이 있어요. 확인 전엔 사지 마세요")
+            elif nw.get("n"):
+                lines.append(f"• 뉴스  최근 3일 {nw['n']}건 · {NW.LABEL_KO.get(nw['label'], nw['label'])}")
         for s_ in ctx.get("skipped_for_earnings", []):
             lines.append(f"\n🚫 {s_['code']} 은 뺐어요 — 실적 발표({s_['next_earnings']})가 코앞이라 위험")
         if ctx["alerts"]:
@@ -363,6 +395,9 @@ class App:
             lines += ["", f"📦 보유 {len(ctx['positions'])}종목 — 손절·목표 도달 없음"]
         ri = ctx["market"].get(self.cfg["regime_index"], {})
         mood = f"\n🌡️ 시장: {LB.regime(ri.get('regime'))}"
+        nm = (ctx.get("news") or {}).get("market_mood") or {}
+        if nm.get("n"):
+            mood += f" · 오늘 시장 뉴스 {nm['n']}건 {NW.LABEL_KO.get(nm['label'], '')}"
         if ri.get("chg_20d_pct") is not None:
             idx_name = "S&P500" if self.cfg.is_us else self.cfg["regime_index"]
             mood += f" ({idx_name} 최근 한 달 {ri['chg_20d_pct']:+.1f}%)"

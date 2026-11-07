@@ -294,7 +294,8 @@ def test_live_stats_and_readiness():
     assert abs(S["methods"][0]["mdd_pct"] - (1 - 1.03 / 1.05) * 100) < 0.01
     assert S["strategies"] == [{"name": "ml_rank", "n": 1, "win_rate": 100.0, "avg_pct": 9.5, "best_pct": 9.5,
                                 "worst_pct": 9.5, "hold_days": 4.0, "exits": {"target": 1},
-                                "by_regime": {"bull": [1, 9.5]}, "backtest_avg_pct": 1.7}]  # same trade counted once
+                                "by_regime": {"bull": [1, 9.5]}, "by_news": {"unknown": [1, 9.5]},
+                                "backtest_avg_pct": 1.7}]  # same trade counted once
     ready = LV.readiness(S)
     assert [r["ok"] for r in ready] == [False, False, True, True, True]
     from stockmining import websim as WS
@@ -333,3 +334,51 @@ def test_weekly_playbook_builds_on_previous_note(tmp_path, monkeypatch):
     from stockmining import quotes as Q
     monkeypatch.setattr(Q, "get", lambda codes: {})
     assert "작게 시작" in web.route(app.cfg, app.db, "/reports", {"t": ["notes"]})
+
+
+
+def test_news_parse_tag_and_point_in_time(tmp_path, monkeypatch):
+    from stockmining import news as NW
+    rss = """<?xml version="1.0"?><rss><channel><title>Google 뉴스</title>
+      <item><title>OO전자, 3000억 유상증자 결정 - 연합뉴스</title><link>https://x/1</link>
+        <pubDate>Thu, 05 Nov 2026 07:00:00 GMT</pubDate><source url="https://yna">연합뉴스</source></item>
+      <item><title>OO전자 대규모 수주 공급계약 체결</title><link>https://x/2</link></item></channel></rss>"""
+
+    class R:
+        content = rss.encode()
+        def raise_for_status(self): pass
+    monkeypatch.setattr(NW.requests, "get", lambda *a, **k: R())
+    items = NW._rss("https://example")
+    assert items[0]["title"] == "OO전자, 3000억 유상증자 결정" and items[0]["source"] == "연합뉴스"
+    assert items[0]["published"].startswith("2026-11-05T07:00")
+    assert NW.rule_tags(items[0]["title"]) == ["capital_raise"] and "contract" in NW.rule_tags(items[1]["title"])
+    assert NW.rule_sentiment(items[0]["title"], ["capital_raise"]) < 0 < NW.rule_sentiment(items[1]["title"], ["contract"])
+    db = DB(tmp_path / "n.db")
+    NW.ensure(db)
+    NW._insert(db, "000001", "news", items[1:], "2026-11-05T18:00:00+09:00")
+    NW._insert(db, "000001", "news", items[:1], "2026-11-06T18:00:00+09:00")
+    db.execute("UPDATE news SET sentiment=1")
+    before = NW.snapshot(db, "000001", "2026-11-06T08:00:00+09:00")
+    after = NW.snapshot(db, "000001", "2026-11-07T08:00:00+09:00")
+    assert before["n"] == 1 and before["label"] == "good"     # the 유상증자 item wasn't seen yet
+    assert after["n"] == 2 and after["label"] == "risk"
+    assert NW.snapshot(db, "999999", "2026-11-07T08:00:00+09:00")["label"] == "none"
+    assert NW.snapshot(DB(tmp_path / "empty.db"), "x", "2026-11-07T08:00:00+09:00")["label"] == "unknown"
+
+
+def test_news_pages_render(tmp_path, monkeypatch):
+    from stockmining import news as NW
+    from stockmining import web
+    from stockmining import quotes as Q
+    from stockmining.config import load_config
+    monkeypatch.setattr(Q, "get", lambda codes: {})
+    p = tmp_path / "c.yaml"
+    p.write_text(yaml.safe_dump({"market": "kr", "notifier": "console", "db_path": str(tmp_path / "k.db")}))
+    cfg = load_config(p)
+    db = DB(cfg.path("db_path"))
+    NW.ensure(db)
+    NW._insert(db, "", "news", [{"title": "코스피 <급락>", "source": "연합", "link": "javascript:alert(1)"}], "2026-11-06T18:00:00+09:00")
+    db.execute("UPDATE news SET sentiment=-2")
+    home = web.route(cfg, db, "/", {})
+    assert "시장 뉴스" in home and "&lt;급락&gt;" in home and "javascript:" not in home
+    assert "코스피" in web.route(cfg, db, "/news", {})

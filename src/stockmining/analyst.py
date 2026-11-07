@@ -412,6 +412,8 @@ def playbook(cfg, principles: str, ctx: dict) -> dict:
 - previous(지난주 노트)를 출발점으로 삼으세요. 근거가 쌓이면 confidence를 올리고, 반박되면 고치거나 빼고, 바꾼 것은 changes에 한 줄씩.
 - works: 수익이 났던 전략·조건·방식 (0~5개). fails: 손실이 났던 것 (0~5개).
 - my_rules: 사용자가 직접 투자할 때 따를 구체적 행동 규칙 3~7개 (언제 사고, 얼마나, 언제 팔고, 무엇을 피할지). 근거가 약한 규칙은 넣지 마세요.
+- live_mock.by_news / strategies[].by_news: 살 때 종목 뉴스 상태(good·bad·mixed·none·risk)별 결과. 뉴스가 수익에 도움이 되는지
+  표본 수와 함께 판단하고, 근거가 쌓이기 전에는 '뉴스로 매수 판단하기'를 my_rules에 넣지 마세요(위험 공시 회피는 예외).
 - watch: 다음 주에 확인할 것 1~3개.
 - headline: 지금까지의 결론 한 문장 (readiness 체크리스트 상황 포함).
 - new_insights / insight_updates: 학습 일지(open_insights)와 같은 규칙. live_mock으로 판정되는 가설은 판정하세요.
