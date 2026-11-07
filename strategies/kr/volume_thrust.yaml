@@ -1,0 +1,20 @@
+name: volume_thrust
+description: >
+  거래량 급증 장대양봉 추종(Qullamaggie의 에피소딕 피벗을 일봉으로 근사). 정배열 종목이 거래량
+  3배 이상, +5% 이상 상승하며 고가 부근에서 마감하면 다음 날 매수.
+source_note: "Kristjan Kullamägi episodic pivot / 거래량 동반 장대양봉"
+regimes: [bull, neutral]
+params: {vol_mult: 3.0, min_ret: 5}
+param_grid: {vol_mult: [2.0, 3.0, 4.0], min_ret: [4, 6]}
+entry:
+  type: next_open
+  all:
+    - "ret_1 >= {min_ret}"
+    - "vol_ratio_20 >= {vol_mult}"
+    - "close >= high - 0.2 * range"
+    - "close > sma_20 and sma_20 > sma_60"
+rank: "vol_ratio_20"
+exit:
+  stop_atr: 1.5
+  target_atr: 4
+  max_hold: 10

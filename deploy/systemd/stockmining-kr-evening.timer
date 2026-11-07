@@ -1,0 +1,10 @@
+[Unit]
+Description=stockmining KR evening (국내 장 마감 후 배치)
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 16:40:00 Asia/Seoul
+Persistent=true
+Unit=stockmining-kr@evening.service
+
+[Install]
+WantedBy=timers.target

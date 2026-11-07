@@ -1,0 +1,18 @@
+name: rsi2_reversion
+description: >
+  Larry Connors RSI(2) 눌림목. 200일선 위 상승추세 종목이 단기 과매도(RSI2 극저)일 때 매수하고
+  5일선 회복 시 청산. 원전에는 손절이 없지만 이 시스템은 모든 규칙에 손절을 강제한다.
+source_note: "Connors & Alvarez, Short Term Trading Strategies That Work"
+regimes: [bull, neutral]
+params: {rsi_th: 10}
+param_grid: {rsi_th: [5, 10, 15]}
+entry:
+  type: next_open
+  all:
+    - "close > sma_200"
+    - "rsi_2 < {rsi_th}"
+rank: "-rsi_2"
+exit:
+  stop_pct: 8
+  max_hold: 7
+  exit_when: ["close > sma_5"]

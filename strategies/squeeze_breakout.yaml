@@ -1,0 +1,21 @@
+name: squeeze_breakout
+description: >
+  볼린저 밴드 수축(스퀴즈) 후 상단 돌파. 변동성 축소 → 확장 전환을 노리는 John Bollinger/
+  TTM Squeeze 계열 아이디어.
+source_note: "John Bollinger, Bollinger on Bollinger Bands"
+regimes: [bull, neutral]
+params: {bbw_max: 12}
+param_grid: {bbw_max: [8, 12, 16]}
+entry:
+  type: next_open
+  all:
+    - "prev(bbw_20, 1) < {bbw_max}"
+    - "close > bbu_20"
+    - "vol_ratio_20 >= 1.5"
+    - "close > sma_60"
+rank: "-prev(bbw_20, 1)"
+exit:
+  stop_atr: 2
+  target_atr: 5
+  trail_atr: 2.5
+  max_hold: 20

@@ -1,0 +1,19 @@
+name: volatility_breakout
+description: >
+  Larry Williams 변동성 돌파(국내 개인 투자자에게 가장 널리 알려진 단기 전략).
+  다음 날 시가 + k × 전일 변동폭을 넘으면 매수(조건부 지정가/스탑 주문), 다음 날 시가 청산.
+  이평 정배열 필터. 장중 주문이 필요하다.
+source_note: "Larry Williams, Long-Term Secrets to Short-Term Trading"
+regimes: [bull, neutral]
+params: {k: 0.5}
+param_grid: {k: [0.4, 0.5, 0.6]}
+entry:
+  type: breakout
+  k: "{k}"
+  all:
+    - "close > sma_5 and close > sma_20 and close > sma_60"
+    - "natr_14 >= 2 and natr_14 <= 7"
+rank: "vol_ratio_20"
+exit:
+  stop_pct: 3
+  max_hold: 1

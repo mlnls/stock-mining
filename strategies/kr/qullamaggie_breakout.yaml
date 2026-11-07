@@ -1,0 +1,22 @@
+name: qullamaggie_breakout
+description: >
+  Kristjan Kullamägi(Qullamaggie) 브레이크아웃. 최근 60일 상승률 상위 10% 주도주가 상승하는
+  10·20일선을 타고 쉬다가 거래량을 동반해 20일 고점을 돌파하면 매수. 손절은 당일 저가 근사
+  (ADR 이내, 1.5ATR), 10일 EMA 아래 종가 마감 시 청산. 원전의 '3~5일 뒤 1/3 익절'은 미구현.
+source_note: "qullamaggie.com 'My 3 timeless setups' (본인 블로그). 실계좌 검증 기록은 공개되지 않음"
+regimes: [bull, neutral]
+params: {rs_min: 90, stop_k: 1.5}
+param_grid: {rs_min: [85, 90, 95], stop_k: [1, 1.5]}
+entry:
+  type: next_open
+  all:
+    - "xrank_ret_60 >= {rs_min}"
+    - "natr_20 >= 3.5"
+    - "close > sma_10 and sma_10 > sma_20 and sma_20 > prev(sma_20, 5)"
+    - "close > hh_20"
+    - "vol_ratio_20 >= 1.5"
+rank: "xrank_ret_60"
+exit:
+  stop_atr: "{stop_k}"
+  max_hold: 60
+  exit_when: ["close < ema_10"]

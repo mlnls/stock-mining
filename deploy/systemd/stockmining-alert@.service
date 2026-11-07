@@ -1,0 +1,10 @@
+[Unit]
+Description=Messenger alert for failed %i
+
+[Service]
+Type=oneshot
+User=stockmining
+Group=stockmining
+EnvironmentFile=/etc/stockmining/env
+Environment=PATH=/var/lib/stockmining/.local/bin:/usr/local/bin:/usr/bin:/bin:/snap/bin
+ExecStart=/opt/stockmining/.venv/bin/stockmining notify "❌ %i 실패 — 서버에서 journalctl -u %i 확인"

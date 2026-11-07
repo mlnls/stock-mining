@@ -1,0 +1,17 @@
+name: ml_rank
+description: >
+  머신러닝(그래디언트 부스팅)이 가격·거래량 지표 21개로 "앞으로 10일 동안 다른 종목보다 더 오를지"를
+  점수(0~100)로 매기고, 그날 점수 최상위 종목을 다음 날 시가에 산다. 3개월마다 그 시점까지의 과거
+  데이터로만 다시 학습하므로 백테스트에 미래 정보가 섞이지 않는다.
+source_note: "이 시스템의 자체 모델 (stockmining/ml.py, scikit-learn HistGradientBoosting, 워크포워드)"
+regimes: [bull, neutral, bear]
+params: {top: 99, stop_k: 2.5, hold: 10}
+param_grid: {top: [97, 98, 99], stop_k: [2, 2.5, 3], hold: [10, 20]}
+entry:
+  type: next_open
+  all:
+    - "ml_score >= {top}"
+rank: "ml_score"
+exit:
+  stop_atr: "{stop_k}"
+  max_hold: "{hold}"

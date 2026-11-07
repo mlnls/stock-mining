@@ -1,0 +1,18 @@
+name: donchian_turtle
+description: >
+  터틀 트레이딩 System 2 변형. 55일 고가 돌파 매수, 20일 저가 이탈 청산, 2ATR 손절.
+  장기 이평 정배열일 때만.
+source_note: "Curtis Faith, Way of the Turtle"
+regimes: [bull]
+params: {n_entry: 55}
+param_grid: {n_entry: [40, 55]}
+entry:
+  type: next_open
+  all:
+    - "close > hh_{n_entry}"
+    - "sma_50 > sma_200"
+rank: "ret_120"
+exit:
+  stop_atr: 2
+  max_hold: 60
+  exit_when: ["close < ll_20"]

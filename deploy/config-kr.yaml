@@ -1,0 +1,10 @@
+# 국내 시장 스윙 모드 (두 번째 인스턴스). 바꾸려면 저장소 루트에 config.kr.yaml 을 만들어 두면 배포 때 이걸 대신 올려요.
+market: kr
+notifier: slack
+profile: normal              # 학습기가 전략을 고름 (공격형 4전략 묶음은 미국 백테스트로 고른 거라 안 씀)
+notify_prefix: "🇰🇷 [국내] "
+
+account:
+  capital: 1000000           # 스윙에 쓸 돈 (원) — 잃어도 되는 금액만
+  max_positions: 3
+  max_new_per_day: 1

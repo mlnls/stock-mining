@@ -1,0 +1,10 @@
+[Unit]
+Description=stockmining evening (미국 장 마감 후 배치, 한국시간 07:30/06:30)
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 17:30:00 America/New_York
+Persistent=true
+Unit=stockmining@evening.service
+
+[Install]
+WantedBy=timers.target

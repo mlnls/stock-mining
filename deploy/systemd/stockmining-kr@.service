@@ -1,0 +1,18 @@
+[Unit]
+Description=stockmining KR (국내) %i job
+After=network-online.target
+Wants=network-online.target
+OnFailure=stockmining-alert@%n.service
+
+[Service]
+Type=oneshot
+User=stockmining
+Group=stockmining
+EnvironmentFile=/etc/stockmining/env
+Environment=PATH=/var/lib/stockmining/.local/bin:/usr/local/bin:/usr/bin:/bin:/snap/bin
+WorkingDirectory=/var/lib/stockmining
+# one heavy job at a time across both markets (shared small host)
+ExecStart=/usr/bin/flock /var/lib/stockmining/.jobs.lock /opt/stockmining/.venv/bin/stockmining --config /etc/stockmining/config-kr.yaml %i
+ExecStartPost=+/usr/local/bin/stockmining-backup
+TimeoutStartSec=3h
+Nice=5
