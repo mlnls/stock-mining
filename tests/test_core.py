@@ -357,7 +357,11 @@ def test_news_parse_tag_and_point_in_time(tmp_path, monkeypatch):
     NW.ensure(db)
     NW._insert(db, "000001", "news", items[1:], "2026-11-05T18:00:00+09:00")
     NW._insert(db, "000001", "news", items[:1], "2026-11-06T18:00:00+09:00")
-    db.execute("UPDATE news SET sentiment=1")
+    db.execute("UPDATE news SET sentiment=1 WHERE title NOT LIKE '%유상증자%'")
+    db.execute("UPDATE news SET sentiment=-1 WHERE title LIKE '%유상증자%'")
+    NW._insert(db, "000002", "news", [{"title": "KB금융 신종자본증권 모집에 4710억 몰려"}], "2026-11-06T18:00:00+09:00")
+    db.execute("UPDATE news SET sentiment=1, tags='[\"capital_raise\"]' WHERE code='000002'")
+    assert NW.snapshot(db, "000002", "2026-11-07T08:00:00+09:00")["label"] == "good"  # good news, not a dilution risk
     before = NW.snapshot(db, "000001", "2026-11-06T08:00:00+09:00")
     after = NW.snapshot(db, "000001", "2026-11-07T08:00:00+09:00")
     assert before["n"] == 1 and before["label"] == "good"     # the 유상증자 item wasn't seen yet

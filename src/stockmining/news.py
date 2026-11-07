@@ -231,7 +231,12 @@ def collect(app, codes: list[str], day: str) -> dict:
     if kr:
         for it in _dart(day, set(codes)):
             n_disc += _insert(app.db, it["code"], "disclosure", [it], seen)
-    scored = score(app)
+    scored = 0
+    for _ in range(4):  # batches of 150 until everything new is labelled
+        k = score(app)
+        scored += k
+        if k < 150:
+            break
     log.info("news: market +%s, stocks +%s (%s codes), disclosures +%s, scored %s", n_mkt, n_stock, len(codes), n_disc, scored)
     mood = market_mood(app.db, seen)
     hist = json.loads(app.db.get("news_mood") or "{}")
@@ -254,7 +259,11 @@ def snapshot(db, code: str, asof: str, days: int = 3) -> dict:
     scored = [r["sentiment"] for r in rows if r["sentiment"] is not None]
     tags = sorted({t for r in rows for t in json.loads(r["tags"] or "[]")})
     sent = round(sum(scored) / len(scored), 2) if scored else None
-    if NEG_TAGS & set(tags):
+    # risk = an explicit risk word in the headline (유상증자, 소송, 거래정지 …) AND judged bad (or a disclosure)
+    risky = [r for r in rows if NEG_TAGS & set(rule_tags(r["title"]))
+             and (r["kind"] == "disclosure" or (r["sentiment"] is not None and r["sentiment"] < 0))]
+    tags = sorted(set(tags) - NEG_TAGS | {t for r in risky for t in NEG_TAGS & set(rule_tags(r["title"]))})
+    if risky:
         label = "risk"
     elif not rows:
         label = "none"
