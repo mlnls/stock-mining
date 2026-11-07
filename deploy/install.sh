@@ -116,6 +116,7 @@ if [ -n "${WEB_DOMAIN:-}" ]; then
   grep -q '^WEB_PASSWORD=' "$ETC/web.env" || echo "WEB_PASSWORD=$(openssl rand -base64 18 | tr -d '/+=')" >> "$ETC/web.env"
   sed -i '/^WEB_HOST=/d;/^WEB_PORT=/d' "$ETC/web.env"
   printf 'WEB_HOST=%s\nWEB_PORT=8787\n' "$GW" >> "$ETC/web.env"
+  sed -i '/^STOCKMINING_WEB_URL=/d' "$ETC/env"; echo "STOCKMINING_WEB_URL=https://$WEB_DOMAIN" >> "$ETC/env"  # links in Slack
   chmod 0640 "$ETC/web.env"; chgrp stockmining "$ETC/web.env"
   systemctl enable stockmining-web.service
   systemctl restart stockmining-web.service

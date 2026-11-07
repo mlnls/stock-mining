@@ -170,23 +170,24 @@ def summary(st: dict | None) -> list[dict]:
 
 
 def slack_lines(st: dict | None, cur_fmt=lambda v: f"{v:,.0f}원") -> str:
-    """Short evening note: today's trades of Claude's pick + the league table."""
+    """Short evening note: Claude's pick (value, today's trades) first, then the ranking in one line each."""
     if not st:
         return ""
     amt, rows = st["amount"], summary(st)
     days = len(st["methods"][rows[0]["id"]]["eq"]) - 1 if rows else 0
-    out = [f"📒 *지금부터 모의투자* · {st['start']} 시작 · {days}거래일째 (각 {amt // 10_000:,}만원)"]
+    out = [f"📒 *지금부터 모의투자* · {days}거래일째 (방식마다 {amt // 10_000:,}만원)"]
     P = st["methods"].get(st.get("pick"))
     if P:
-        today = [e for e in P["events"] if e[0] == st["last"]]
-        for e in today:
+        v = P["eq"][-1][1]
+        out.append(f"⭐ {P['label']}  *{cur_fmt(amt * v)}* ({(v - 1) * 100:+.1f}%) · {len(P['pos'])}종목 보유")
+        for e in [e for e in P["events"] if e[0] == st["last"]][:5]:
             nm = st["names"].get(e[2], e[2])
-            out.append(f"• {'🟢 샀어요' if e[1] == 'b' else '🔴 팔았어요'} {nm}" + (f" ({e[5]:+.1f}%)" if e[1] == "s" else ""))
-    for r in rows:
-        out.append(f"{'⭐ ' if r['pick'] else '• '}{r['label']}  {cur_fmt(amt * r['eq'])} ({(r['eq'] - 1) * 100:+.1f}%)")
+            out.append(f"   {'🟢 샀어요' if e[1] == 'b' else '🔴 팔았어요'} {nm}" + (f" {e[5]:+.1f}%" if e[1] == "s" else ""))
     b = st["bench"]["eq"][-1][1] if st["bench"]["eq"] else None
+    rank = " · ".join(f"{i}. {'⭐' if r['pick'] else ''}{r['label']} {(r['eq'] - 1) * 100:+.1f}%" for i, r in enumerate(rows, 1))
+    out += ["", "순위  " + rank]
     if b:
-        out.append(f"• {st['bench']['name']} 그냥 들고 있기  {(b - 1) * 100:+.1f}%")
+        out.append(f"비교  {st['bench']['name']} 그냥 들고 있기 {(b - 1) * 100:+.1f}%")
     return "\n".join(out)
 
 

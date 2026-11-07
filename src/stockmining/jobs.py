@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
 import traceback
 from datetime import datetime
@@ -199,6 +200,87 @@ class App:
             return
         self.run_engine(day)
         self.live()
+
+    def dashboard_url(self, path: str = "") -> str:
+        base = os.environ.get("STOCKMINING_WEB_URL", "").rstrip("/")
+        return f"{base}{'' if self.cfg.is_us else '/kr'}{path}" if base else ""
+
+    def weekly_slack(self, since: str) -> str:
+        """The weekly result in ~20 plain lines; everything else stays on the dashboard."""
+        import re as _re
+        d = self.now()
+        out = [f"🧠 *주간 학습* · {d.month}/{d.day}"]
+        pb = json.loads(self.db.get("playbook") or "null") or {}
+        note, live = pb.get("note"), pb.get("stats")
+        if note and pb.get("note_ts", "") >= since:
+            out.append(f"> {note['headline']}")
+        if live:
+            ready = live.get("readiness") or []
+            todo = [f"{r['label'].split(' (')[0]} (지금 {r['now']})" for r in ready if not r["ok"]]
+            out += ["", f"📓 *직접 투자 준비 {sum(r['ok'] for r in ready)}/{len(ready)}*"]
+            out += [f"   ⬜ {t}" for t in todo[:3]]
+            pick = next((m for m in live["methods"] if m["pick"]), None)
+            if pick:
+                top = live["methods"][0]
+                line = f"📈 *모의투자* {live['days']}일째 · ⭐ {pick['label']} *{pick['total_pct']:+.1f}%*"
+                if live.get("bench_pct") is not None:
+                    line += f" · {live['bench_name']} {live['bench_pct']:+.1f}%"
+                if top["id"] != pick["id"]:
+                    line += f"\n   지금 1등: {top['label']} {top['total_pct']:+.1f}%"
+                out += ["", line]
+
+        props = self.db.query("SELECT * FROM proposals WHERE created>=? ORDER BY id", (since,))
+        nums = lambda t: [float(x) for x in _re.findall(r"(-?\d+(?:\.\d+)?)%", t or "")]
+        auto = [p for p in props if p["kind"] == "params"]
+        if auto:
+            out += ["", "⚙️ *자동으로 고친 것*"]
+            for p in auto[:4]:
+                st = json.loads(p["payload"]).get("strategy")
+                n = nums(p["rationale"])
+                out.append(f"• {LB.strat(st)} 숫자 조정" + (f" — 과거 검증 거래당 {n[0]:+.1f}% → *{n[1]:+.1f}%*" if len(n) >= 2 else "")
+                           + ("" if p["status"] == "applied" else f"  `approve {p['id']}`"))
+        ask = [p for p in props if p["status"] == "pending" and p["kind"] in ("refine", "rule", "principle")]
+        if ask:
+            out += ["", f"🙋 *승인해 줄 것 {len(ask)}개*"]
+            for p in ask[:3]:
+                if p["kind"] == "refine":
+                    pl = json.loads(p["payload"])
+                    m = _re.match(r"\s*(\w+)\s*([<>]=?)\s*(-?[\d.]+)", pl.get("condition", ""))
+                    cond = (f"{EM.CONDITIONS.get(m[1], m[1])} {float(m[3]):g} {'이상' if '>' in m[2] else '이하'}일 때만 사기"
+                            if m else pl.get("condition", ""))
+                    n = nums(p["rationale"])
+                    out.append(f"• {LB.strat(pl.get('strategy'))}: {cond}" + (f" → 거래당 {n[0]:+.1f}% → *{n[1]:+.1f}%*" if len(n) >= 2 else ""))
+                else:
+                    out.append(f"• {p['title']}")
+                out[-1] += f"  `approve {p['id']}`"
+            if len(ask) > 3:
+                out.append(f"   외 {len(ask) - 3}개는 대시보드 '승인 대기'에서")
+
+        res = self.db.query("SELECT body FROM reports WHERE kind='weekly_research' AND ts>=? ORDER BY id DESC LIMIT 1", (since,))
+        rules = [p for p in props if p["kind"] == "rule"]
+        lessons = self.db.query("SELECT kind, text FROM insights WHERE ts>=? ORDER BY id", (since,))
+        if res or rules or lessons:
+            topic = res[0]["body"].splitlines()[0].replace("주제: ", "") if res else ""
+            out += ["", "📚 *이번 주 공부*" + (f" · {topic}" if topic else "")]
+            if rules:
+                ok = sum(1 for p in rules if p["passed"])
+                out.append(f"• 새 규칙 후보 {len(rules)}개 시험 → 통과 {ok}개" + (" (모두 탈락)" if not ok else ""))
+            for l in lessons[:2]:
+                t = l["text"]
+                out.append(f"• {'배운 것' if l['kind'] == 'lesson' else '확인할 가설' if l['kind'] == 'hypothesis' else '관찰'}: "
+                           + (t if len(t) <= 90 else t[:88] + "…"))
+
+        regime = self.current_regime()
+        stats = L.strategy_stats(self.db, self.db.strategies(("active", "muted")), regime, self.cfg.raw)
+        good = sorted((s_ for s_ in stats if s_["posterior_expectancy_pct"] > 0), key=lambda s_: -s_["posterior_expectancy_pct"])
+        bad = [s_ for s_ in stats if s_["posterior_expectancy_pct"] <= 0]
+        out += ["", f"🏆 *지금 믿는 전략* (시장 {LB.regime(regime)})"]
+        out += [f"{i}. {LB.strat(s_['name'])}  거래당 {s_['posterior_expectancy_pct']:+.1f}%" for i, s_ in enumerate(good[:3], 1)]
+        if bad:
+            out.append("⛔ 손실 예상: " + ", ".join(LB.strat(s_["name"]) for s_ in bad[:4]) + (f" 외 {len(bad) - 4}개" if len(bad) > 4 else ""))
+        url = self.dashboard_url("/reports")
+        out += ["", f"🔗 <{url}|자세한 내용은 대시보드에서>" if url else "🔗 자세한 내용은 대시보드 '리포트'에서"]
+        return "\n".join(out)
 
     def collect_news(self, day: str, recs, signals, positions) -> dict:
         """Evening news/disclosure collection for tomorrow's candidates, holdings, the mock ledger's positions and
@@ -623,5 +705,5 @@ class App:
             lines.append(f"- {s['name']} [{s['status']}] 사후기대값 {s['posterior_expectancy_pct']}% "
                          f"(페이퍼 {s['paper_trades']}건 {s['paper_expectancy_pct']}%)")
         body = "\n".join(lines)
-        self.db.add_report("weekly", body, now)
-        self.tg.send(body)
+        self.db.add_report("weekly", body, now)  # full detail → dashboard (리포트)
+        self.tg.send(self.weekly_slack(now))     # short, plain-language summary → Slack
