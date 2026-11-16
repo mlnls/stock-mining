@@ -2,7 +2,7 @@
 # Deploy to an existing Lightsail (or any Ubuntu) host over SSH — no S3/SSM on the server.
 # Secrets are read from SSM on THIS machine and piped to /etc/stockmining/env on the host.
 #   HOST=54.116.117.190 KEY=~/Downloads/LightsailDefaultKey-ap-northeast-2.pem ./deploy/lightsail.sh
-#   WEB_DOMAIN=stock.54-116-117-190.sslip.io ...  → also serve the dashboard through the host's Caddy
+#   WEB_DOMAIN=stock.mlnl.cloud,stock.54-116-117-190.sslip.io ...  → also serve the dashboard through the host's Caddy (first = Slack links)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 HOST="${HOST:?HOST=ip}"; KEY="${KEY:?KEY=path/to/key.pem}"; USER_="${SSH_USER:-ubuntu}"

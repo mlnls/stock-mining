@@ -67,6 +67,7 @@ if [ -n "$LOCAL" ]; then
   grep -q '^STOCKMINING_CONFIG_KR=' "$ETC/env" || echo "STOCKMINING_CONFIG_KR=/etc/stockmining/config-kr.yaml" >> "$ETC/env"
   # dashboard link for Slack messages: remembered in web.env from the deploy that set up the domain
   WD="${WEB_DOMAIN:-$(sed -n 's/^WEB_DOMAIN=//p' "$ETC/web.env" 2>/dev/null)}"
+  WD="${WD%%,*}"; WD="${WD// /}"  # several domains allowed (a.com,b.com) — Slack links use the first
   if [ -n "$WD" ]; then sed -i '/^STOCKMINING_WEB_URL=/d' "$ETC/env"; echo "STOCKMINING_WEB_URL=https://$WD" >> "$ETC/env"; fi
 else
   install -m 0755 "$APP/deploy/fetch-secrets.sh" /usr/local/bin/stockmining-fetch-secrets
@@ -111,6 +112,7 @@ if systemctl is-enabled --quiet stockmining-web.service 2>/dev/null; then system
 
 # 5b) web dashboard behind the host's existing Caddy (docker) — only when WEB_DOMAIN is given
 if [ -n "${WEB_DOMAIN:-}" ]; then
+  WEB_DOMAIN=$(echo "$WEB_DOMAIN" | sed 's/ //g; s/,/, /g')  # Caddy site list: "a.com, b.com"
   CADDY="${CADDY_CONTAINER:-more-mlnls-caddy-1}"
   CADDYFILE="${CADDYFILE:-/srv/more-mlnls/deploy/Caddyfile}"
   NET=$(docker inspect "$CADDY" -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{end}}' | awk '{print $1}')
