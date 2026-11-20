@@ -121,7 +121,7 @@ CREATE TABLE IF NOT EXISTS insights (
     source TEXT NOT NULL,          -- evening | weekly | edgemap
     kind TEXT NOT NULL,            -- observation | hypothesis | lesson
     text TEXT NOT NULL,
-    status TEXT NOT NULL,          -- open | confirmed | rejected
+    status TEXT NOT NULL,          -- open | confirmed | rejected | merged (same question as an older one) | expired (never judged)
     note TEXT
 );
 

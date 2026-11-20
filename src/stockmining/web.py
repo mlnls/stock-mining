@@ -421,13 +421,19 @@ def reports(c: Ctx, tab: str) -> tuple[str, str, list[str]]:
                   ("/reports?t=props", "승인 대기", tab == "props"), ("/reports?t=edge", "엣지 맵", tab == "edge"),
                   ("/reports?t=notes", "투자 노트", tab == "notes")])]
     if tab == "learn":
-        status_ko = {"open": ("확인 중", ""), "confirmed": ("맞았음", "good"), "rejected": ("틀렸음", "bad")}
-        ins = c.db.query("SELECT * FROM insights ORDER BY id DESC LIMIT 50")
+        status_ko = {"open": ("확인 중", ""), "confirmed": ("맞았음", "good"), "rejected": ("틀렸음", "bad"),
+                     "expired": ("판정 못 함", "")}
+        # merged = the same question asked again in other words; the oldest copy stays and carries the verdict
+        ins = c.db.query("SELECT * FROM insights WHERE status != 'merged' ORDER BY id DESC LIMIT 50")
+        merged = c.db.query("SELECT COUNT(*) n FROM insights WHERE status = 'merged'")[0]["n"]
         lst = "".join(f'<li class="note"><em class="{status_ko.get(i["status"], ("", ""))[1]}">'
                       f'{status_ko.get(i["status"], (i["status"], ""))[0]}</em> {h(i["text"])}'
                       + (f'<small>→ {h(i["note"])}</small>' if i["note"] else "") + f'<small>{h(kst(i["ts"]))}</small></li>'
                       for i in ins)
-        out.append(card("학습 일지", f'<ul class="plain">{lst}</ul>' if ins else empty("📒", "시스템이 배운 것이 아직 없어요.")))
+        body = f'<ul class="plain">{lst}</ul>' if ins else empty("📒", "시스템이 배운 것이 아직 없어요.")
+        if merged:
+            body += f'<p class="hint">같은 질문을 말만 바꿔 다시 쓴 {merged}개는 처음 것 하나로 합쳐서 숨겼어요.</p>'
+        out.append(card("학습 일지", body))
     elif tab == "props":
         props = c.db.query("SELECT * FROM proposals WHERE status='pending' ORDER BY id")
         lst = "".join(f'<li class="note"><b>#{p["id"]} {h(p["title"])}</b><small>{h((p["rationale"] or "")[:500])}</small>'

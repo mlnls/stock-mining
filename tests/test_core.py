@@ -125,10 +125,66 @@ def test_learning_log(tmp_path, monkeypatch):
                                         "insight_updates": []})
     assert len(out) == 1 and len(app.open_insights()) == 1
     iid = app.open_insights()[0]["id"]
-    app.save_learning("weekly", {"new_insights": [{"kind": "hypothesis", "text": "저변동성 종목은 손실"}],  # duplicate
+    app.save_learning("weekly", {"new_insights": [{"kind": "hypothesis", "text": "저변동성 종목은 손실."}],  # duplicate
                                  "insight_updates": [{"id": iid, "status": "confirmed", "note": "8개 전략에서 t<-2"}]})
     assert app.open_insights() == []
     assert app.db.query("SELECT COUNT(*) n FROM insights")[0]["n"] == 1
+
+
+def test_learning_log_merges_and_closes_old_entries(tmp_path, monkeypatch):
+    """Claude sees every open entry with its age, can fold repeats into the oldest one, and nothing stays open forever."""
+    from datetime import datetime, timedelta
+    from stockmining import analyst as AI
+    from stockmining.config import load_config
+    from stockmining.jobs import App
+    cfgp = tmp_path / "c.yaml"
+    cfgp.write_text(f"db_path: {tmp_path/'x.db'}\nprinciples_path: {tmp_path/'p.md'}\nnotifier: console\n")
+    app = App(load_config(cfgp))
+    now = datetime(2026, 11, 20, 18, 0, tzinfo=app.tz)
+    monkeypatch.setattr(App, "now", lambda self: now)
+    for days, text in [(50, "아주 오래된 가설"), (25, "같은 날 몰아 사면 손절이 겹친다"), (3, "하루에 몰아 산 종목은 함께 손절된다")]:
+        app.db.execute("INSERT INTO insights(ts,source,kind,text,status) VALUES(?, 'evening', 'hypothesis', ?, 'open')",
+                       ((now - timedelta(days=days)).isoformat(timespec="seconds"), text))
+    rows = app.open_insights()
+    assert [r["age_days"] for r in rows] == [50, 25, 3]  # oldest first, all of them
+    assert set(rows[0]) == {"id", "date", "age_days", "kind", "text"}
+
+    old, mid, new = (r["id"] for r in rows)
+    out = app.save_learning("evening", {"new_insights": [], "insight_updates": [
+        {"id": new, "status": "merged", "note": f"#{mid}와 같음"},
+        {"id": mid, "status": "bogus", "note": "알 수 없는 상태는 무시"}]})
+    assert out == []  # housekeeping stays out of the report
+    assert [r["id"] for r in app.open_insights()] == [old, mid]
+
+    assert app.expire_insights() == 1  # only the one past INSIGHT_EXPIRE_DAYS
+    st = app.db.query("SELECT status, note FROM insights WHERE id=?", (old,))[0]
+    assert st["status"] == "expired" and f"{AI.INSIGHT_EXPIRE_DAYS // 7}주" in st["note"]
+    assert [r["id"] for r in app.open_insights()] == [mid]
+    assert f"age_days가 {AI.INSIGHT_DUE_DAYS}일 이상" in AI.INSIGHT_RULES
+
+    from stockmining import web
+    from stockmining import quotes as Q
+    monkeypatch.setattr(Q, "get", lambda codes: {})
+    html = web.route(app.cfg, app.db, "/reports", {"t": ["learn"]})
+    assert "판정 못 함" in html and "합쳐서 숨겼어요" in html and "하루에 몰아 산" not in html
+
+
+def test_live_closed_trades_show_the_real_bars(tmp_path):
+    """A return that looks too good can be checked: prices used, that day's bar, and the gross return."""
+    from stockmining import live as LV
+    idx = pd.to_datetime(["2026-11-05", "2026-11-06", "2026-11-11", "2026-11-12"])
+    df = pd.DataFrame({"open": [48900, 35750, 42100, 48150], "high": [48900, 39250, 49000, 50300],
+                       "low": [39800, 34450, 42100, 46650], "close": [41000, 38550, 49000, 47600]}, index=idx)
+    ev = [["2026-11-06", "b", "064290", "bb_trend_pullback", 35750.0, None, ""],
+          ["2026-11-12", "s", "064290", "bb_trend_pullback", 48150.0, 34.11, "rule", "2026-11-06", "bear", "unknown"]]
+    st = {"names": {"064290": "인텍플러스"}, "methods": {"a": {"events": ev}, "b": {"events": [list(e) for e in ev]}}}
+    t = LV.closed_trades(st, {"064290": df})
+    assert len(t) == 1  # the same trade held by two methods counts once
+    t = t[0]
+    assert t["name"] == "인텍플러스" and t["buy_price"] == t["buy_day"]["open"] == 35750
+    assert t["sell_day"] == {"open": 48150, "high": 50300, "low": 46650, "close": 47600}
+    assert t["gross_pct"] == 34.69 and t["net_pct"] == 34.11
+    assert LV.closed_trades(st)[0]["buy_day"] is None  # without the price panel: prices only
 
 
 def test_bot_accepts_commands_without_slash(tmp_path):

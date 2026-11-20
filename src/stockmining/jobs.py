@@ -58,25 +58,45 @@ class App:
             return pd.Timestamp(day).weekday() < 5
 
     # ------------------------------------------------------------------ learning log
-    def open_insights(self, limit: int = 20) -> list[dict]:
-        return self.db.query("SELECT id, ts, source, kind, text FROM insights WHERE status='open' "
-                             "ORDER BY id DESC LIMIT ?", (limit,))
+    def open_insights(self) -> list[dict]:
+        """Every entry still waiting for a verdict, oldest first, with its age. All of them go to Claude:
+        showing only the latest few let old ones drop out of sight and get re-asked in new words."""
+        today = pd.Timestamp(self.today())
+        return [{"id": r["id"], "date": r["ts"][:10], "age_days": (today - pd.Timestamp(r["ts"][:10])).days,
+                 "kind": r["kind"], "text": r["text"]}
+                for r in self.db.query("SELECT id, ts, kind, text FROM insights WHERE status='open' ORDER BY id")]
+
+    def expire_insights(self) -> int:
+        """Backstop for the rule Claude is given: close entries still open after INSIGHT_EXPIRE_DAYS."""
+        cut = (self.now() - pd.Timedelta(days=AI.INSIGHT_EXPIRE_DAYS)).strftime("%Y-%m-%d")
+        n = self.db.execute("UPDATE insights SET status='expired', note=? WHERE status='open' AND substr(ts,1,10) < ?",
+                            (f"{AI.INSIGHT_EXPIRE_DAYS // 7}주 안에 판정되지 않아 자동으로 닫음", cut)).rowcount
+        if n:
+            log.info("learning log: %d open entr%s expired", n, "y" if n == 1 else "ies")
+        return n
 
     def save_learning(self, source: str, out: dict) -> list[str]:
-        """Store Claude's new insights and status updates; returns short lines for the report."""
+        """Store Claude's new insights and status updates; returns short lines for the report.
+        merged / expired are housekeeping (duplicates, nothing to judge) and stay out of the report."""
+        import re as _re
         now = self.now().isoformat(timespec="seconds")
-        known = {r["text"] for r in self.db.query("SELECT text FROM insights")}
+        same = lambda t: _re.sub(r"[\W_]+", "", t)  # same sentence up to spacing and punctuation
+        known = {same(r["text"]) for r in self.db.query("SELECT text FROM insights")}
         lines = []
         for i in out.get("new_insights", [])[:5]:
-            if i["text"].strip() and i["text"] not in known:
+            text = i["text"].strip()
+            if text and same(text) not in known:
+                known.add(same(text))
                 self.db.execute("INSERT INTO insights(ts,source,kind,text,status) VALUES(?,?,?,?, 'open')",
-                                (now, source, i["kind"], i["text"].strip()))
-                lines.append(f"📝 {i['kind']}: {i['text'].strip()}")
-        open_ids = {r["id"] for r in self.open_insights(200)}
+                                (now, source, i["kind"], text))
+                lines.append(f"📝 {i['kind']}: {text}")
+        open_ids = {r["id"] for r in self.open_insights()}
         for u in out.get("insight_updates", []):
-            if u["id"] in open_ids and u["status"] != "open":
+            if u["id"] in open_ids and u["status"] in ("confirmed", "rejected", "merged", "expired"):
+                open_ids.discard(u["id"])
                 self.db.execute("UPDATE insights SET status=?, note=? WHERE id=?", (u["status"], u["note"], u["id"]))
-                lines.append(f"{'✅' if u['status'] == 'confirmed' else '❌'} 가설 #{u['id']} {u['status']}: {u['note']}")
+                if u["status"] in ("confirmed", "rejected"):
+                    lines.append(f"{'✅' if u['status'] == 'confirmed' else '❌'} 가설 #{u['id']} {u['status']}: {u['note']}")
         return lines
 
     def current_regime(self) -> str:
@@ -311,9 +331,11 @@ class App:
                 out[s_["name"]] = e
         return out
 
-    def playbook(self) -> list[str]:
-        """Weekly 투자 노트 (kv playbook + report). Deterministic stats always; Claude's note when available."""
-        live = LV.brief(LV.load(self.db), self.backtest_expectancy())
+    def playbook(self, panel=None) -> list[str]:
+        """Weekly 투자 노트 (kv playbook + report). Deterministic stats always; Claude's note when available.
+        ``panel`` adds the real bars of each closed mock trade so Claude can check fills instead of guessing."""
+        self.expire_insights()
+        live = LV.brief(LV.load(self.db), self.backtest_expectancy(), panel)
         if not live:
             return []
         prev = json.loads(self.db.get("playbook") or "null")
@@ -400,6 +422,7 @@ class App:
              "currency": cfg["currency"], "next_earnings": getattr(r, "next_earnings", None),
              "news": news["stocks"].get(r.code)}
             for r in recs.itertuples()]
+        self.expire_insights()
         ctx = {
             "date": day, "market": market, "learner_changes": changes,
             "strategies": stats, "weights": {k: round(v, 3) for k, v in weights.items()},
@@ -412,7 +435,7 @@ class App:
             "profile": cfg["profile"],
             "edge_summary": self.db.get("edge_summary") or "아직 없음(주간 배치 후 생성)",
             "open_insights": self.open_insights(),
-            "live_mock": LV.brief(LV.load(self.db), self.backtest_expectancy()),
+            "live_mock": LV.brief(LV.load(self.db), self.backtest_expectancy(), panel),
             "news": {"market_mood": news["market"], "holdings": {c: news["stocks"].get(c) for c in positions},
                      "note": "뉴스는 수집 시점 기준. 아직 성과로 검증되지 않았으니 위험 공시(risk) 경고 위주로 쓰고, 좋은 뉴스로 매수를 권하지 말 것."},
         }
@@ -695,7 +718,7 @@ class App:
                 lines.append(f"리서치 실패: {e}")
 
         # 4b) 투자 노트: what the forward mock investing has taught so far, for the user's own investing later
-        lines += self.playbook()
+        lines += self.playbook(panel)
 
         # 5) leaderboard
         regime = self.current_regime()

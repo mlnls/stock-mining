@@ -146,9 +146,9 @@ def handle(app: App, text: str) -> str:
                            f"기대값 {f.get('expectancy_pct')}% | 페이퍼 {n['n']}건 {round(n['a'] or 0, 2)}%")
             return "\n".join(out)
         if cmd == "/insights":
-            rows = app.db.query("SELECT * FROM insights ORDER BY id DESC LIMIT 15")
-            icon = {"open": "⏳", "confirmed": "✅", "rejected": "❌"}
-            return "\n".join(f"{icon[r['status']]} #{r['id']} [{r['kind']}] {r['text']}"
+            rows = app.db.query("SELECT * FROM insights WHERE status != 'merged' ORDER BY id DESC LIMIT 15")
+            icon = {"open": "⏳", "confirmed": "✅", "rejected": "❌", "expired": "⌛"}
+            return "\n".join(f"{icon.get(r['status'], '·')} #{r['id']} [{r['kind']}] {r['text']}"
                              + (f"\n   → {r['note']}" if r["note"] else "") for r in rows) or "학습 일지 비어 있음"
         if cmd == "/mock":
             from . import live as LV

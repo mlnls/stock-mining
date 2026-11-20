@@ -175,12 +175,26 @@ _INSIGHT_UPDATE = {
     "type": "object",
     "properties": {
         "id": {"type": "integer"},
-        "status": {"type": "string", "enum": ["open", "confirmed", "rejected"]},
+        "status": {"type": "string", "enum": ["open", "confirmed", "rejected", "merged", "expired"]},
         "note": {"type": "string"},
     },
     "required": ["id", "status", "note"],
     "additionalProperties": False,
 }
+# A hypothesis must be judged within DUE days; after EXPIRE days the system closes it on its own (jobs.expire_insights).
+INSIGHT_DUE_DAYS, INSIGHT_EXPIRE_DAYS = 21, 42
+INSIGHT_RULES = f"""학습 일지 규칙 (open_insights = 아직 판정 안 된 가설 전부, 오래된 순. age_days = 쓴 지 며칠)
+- new_insights: open_insights에 같은 조건·같은 질문이 이미 있으면 말만 바꿔 다시 쓰지 마세요. 새 근거는 그 가설을 판정할 때 note에 씁니다.
+- insight_updates의 status:
+  · confirmed / rejected: data로 맞았는지 틀렸는지 판정되면. note에 근거 숫자와 표본 수.
+  · merged: open_insights 안에서 같은 질문이 겹치면 가장 오래된 것 하나만 남기고 나머지는 merged. note는 "#남긴id와 같음".
+  · expired: 우리 데이터로 확인할 수 없거나, 기한 안에 판정할 표본이 모이지 않은 가설. note에 이유.
+- age_days가 {INSIGHT_DUE_DAYS}일 이상인 가설은 이번에 반드시 confirmed·rejected·expired 중 하나로 닫으세요.
+  {INSIGHT_EXPIRE_DAYS}일이 지나도 열려 있으면 시스템이 판정 없이 닫습니다.
+- "30건 쌓이면 확인"처럼 표본 수를 기다리는 가설은 그 표본이 쌓였으면 바로 판정하세요.
+- live_mock의 수익률이나 체결가가 의심되면 live_mock.closed_trades로 직접 확인하세요. 산 가격·판 가격, 그날 실제 시세(시가·고가·저가·종가),
+  비용 빼기 전 수익률(gross_pct)이 있습니다. 가격이 그날 시세와 맞고 계산도 맞으면 '계산 오류'를 묻는 가설은 rejected로 닫고,
+  같은 의심을 다시 쓰지 마세요."""
 _LEARNING_PROPS = {
     "new_insights": {"type": "array", "items": _INSIGHT},
     "insight_updates": {"type": "array", "items": _INSIGHT_UPDATE},
@@ -232,9 +246,11 @@ def evening_report(cfg, principles: str, ctx: dict) -> dict:
    - kind=principle: principle_text에 원칙.md에 추가할 한두 문장, rule_spec_json은 빈 문자열.
    - kind=rule: rule_spec_json에 아래 형식의 새 규칙 JSON 문자열(백테스트로 검증됨), principle_text는 빈 문자열.
 3. new_insights: 학습 일지에 남길 새 관찰·가설·교훈 0~3개. 오늘 데이터(신호, 페이퍼 결과, live_mock 실전 모의투자, edge_summary, 시장)에서
-   '어떤 조건에서 돈이 벌리고/잃는가'에 대한 구체적이고 검증 가능한 문장으로. 이미 open_insights에 있는 내용은 반복하지 마세요.
+   '어떤 조건에서 돈이 벌리고/잃는가'에 대한 구체적이고 검증 가능한 문장으로.
    예) hypothesis: "VIX 20 이상일 때 qullamaggie_breakout 페이퍼 매매 손실이 몰린다 → 국면 필터 후보"
-4. insight_updates: open_insights 중 오늘 데이터로 확인(confirmed)·기각(rejected)할 수 있는 것만. 근거를 note에.
+4. insight_updates: 아래 학습 일지 규칙대로 판정·정리.
+
+{INSIGHT_RULES}
 
 {DF.DOC_GUIDE}
 
@@ -355,6 +371,8 @@ name은 기존 전략 이름과 겹치지 않는 snake_case로 하세요. 기존
 가설을 규칙으로 바꿔 검증할 수 있으면 후보로 만들고, 리서치 결과로 판정되는 가설은 insight_updates에 기록하세요.
 리서치에서 얻은 교훈은 new_insights(kind=lesson)로 남기세요.
 
+{INSIGHT_RULES}
+
 <research_notes>
 {notes}
 </research_notes>
@@ -416,8 +434,10 @@ def playbook(cfg, principles: str, ctx: dict) -> dict:
   표본 수와 함께 판단하고, 근거가 쌓이기 전에는 '뉴스로 매수 판단하기'를 my_rules에 넣지 마세요(위험 공시 회피는 예외).
 - watch: 다음 주에 확인할 것 1~3개.
 - headline: 지금까지의 결론 한 문장 (readiness 체크리스트 상황 포함).
-- new_insights / insight_updates: 학습 일지(open_insights)와 같은 규칙. live_mock으로 판정되는 가설은 판정하세요.
-쉬운 한국어로, 투자 용어는 풀어서 쓰세요.""", cfg["claude"]["effort_research"], schema=PLAYBOOK_SCHEMA)
+- new_insights / insight_updates: 아래 학습 일지 규칙대로. live_mock으로 판정되는 가설은 판정하세요.
+쉬운 한국어로, 투자 용어는 풀어서 쓰세요.
+
+{INSIGHT_RULES}""", cfg["claude"]["effort_research"], schema=PLAYBOOK_SCHEMA)
     return json.loads(text)
 
 

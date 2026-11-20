@@ -277,13 +277,51 @@ def readiness(S: dict | None, pick: str = PICK) -> list[dict]:
     ]
 
 
-def brief(st: dict | None, backtests: dict | None = None) -> dict | None:
+def _bar(df: pd.DataFrame | None, day: str) -> dict | None:
+    if df is None:
+        return None
+    try:
+        r = df.loc[pd.Timestamp(day)]
+    except KeyError:
+        return None
+    if isinstance(r, pd.DataFrame):
+        r = r.iloc[-1]
+    return {k: round(float(r[k]), 4) for k in ("open", "high", "low", "close")}
+
+
+def closed_trades(st: dict | None, panel=None, n: int = 30) -> list[dict]:
+    """Latest closed trades (one per trade, pooled over methods) with the prices used and, given the price
+    panel, that day's real bar — so a return that looks too good can be checked instead of guessed at."""
+    if not st:
+        return []
+    seen, out = set(), []
+    for v in st["methods"].values():
+        buys = {(e[2], e[3], e[0]): e[4] for e in v["events"] if e[1] == "b"}
+        for e in v["events"]:
+            if e[1] != "s" or len(e) < 8 or (e[2], e[3], e[7]) in seen:
+                continue
+            seen.add((e[2], e[3], e[7]))
+            df = panel.get(e[2]) if panel is not None else None
+            buy = buys.get((e[2], e[3], e[7]))
+            out.append({"code": e[2], "name": st["names"].get(e[2], e[2]), "strategy": e[3], "why": e[6],
+                        "buy_date": e[7], "buy_price": buy, "buy_day": _bar(df, e[7]),
+                        "sell_date": e[0], "sell_price": e[4], "sell_day": _bar(df, e[0]),
+                        "gross_pct": round((e[4] / buy - 1) * 100, 2) if buy else None, "net_pct": e[5]})
+    out.sort(key=lambda t: t["sell_date"], reverse=True)
+    return out[:n]
+
+
+def brief(st: dict | None, backtests: dict | None = None, panel=None) -> dict | None:
     """Compact view for Claude's prompts."""
     S = stats(st, backtests)
     if not S:
         return None
     P = st["methods"].get(st.get("pick"), {})
     return {**S, "pick": st.get("pick"), "readiness": readiness(S),
+            "closed_trades": closed_trades(st, panel),
+            "fills": "산 가격 = 신호 다음 날 시가(돌파형은 그날 돌파 가격). 판 가격 = 손절가·목표가(갭으로 넘었으면 그날 시가), "
+                     "또는 청산 조건·최대 보유일이 된 다음 날 시가. net_pct = gross_pct에서 거래 비용(수수료·슬리피지)을 뺀 값. "
+                     "buy_day·sell_day = 그날 실제 시세.",
             "pick_holdings": [{k: p[k] for k in ("code", "strategy", "entry_date", "entry", "stop", "last")} for p in P.get("pos", [])],
             "pick_recent": P.get("events", [])[-10:],
             "note": "앞으로 진행 중인 실전 모의투자(결과를 보고 고칠 수 없는 기록). 표본이 적으면 결론을 미룰 것."}
