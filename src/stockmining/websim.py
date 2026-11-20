@@ -292,15 +292,16 @@ def live_card(L: dict | None, base: str = "") -> str:
     rows = ""
     for r in LV.summary(L):
         g = (r["eq"] - 1) * 100
-        rows += (f'<tr><td><i class="sw lv{LIVE_ORDER.index(r["id"]) if r["id"] in LIVE_ORDER else 0}"></i>'
-                 f'{"⭐ " if r["pick"] else ""}<b>{h(r["label"])}</b><small class="sub">보유 {r["n"]}종목 · 산 횟수 {r["trades"]}번</small></td>'
+        rows += (f'<tr><td><a class="lvm" href="/sim/{h(r["id"])}"><i class="sw lv{LIVE_ORDER.index(r["id"]) if r["id"] in LIVE_ORDER else 0}"></i>'
+                 f'{"⭐ " if r["pick"] else ""}<b>{h(r["label"])}</b><small class="sub">보유 {r["n"]}종목 · 산 횟수 {r["trades"]}번</small></a></td>'
                  f'<td>{money(amt * r["eq"], "KRW")}</td><td class="{tone(g)}">{pct(g, 1)}</td></tr>')
     b = L["bench"]["eq"][-1][1] if L["bench"]["eq"] else None
     if b:
         rows += (f'<tr class="ref"><td><i class="sw ref"></i>📈 {h(L["bench"]["name"])} 그냥 들고 있기</td>'
                  f'<td>{money(amt * b, "KRW")}</td><td class="{tone(b - 1)}">{pct((b - 1) * 100, 1)}</td></tr>')
     body = head + _live_chart(L) + ('<div class="tscroll"><table class="t rank"><thead><tr><th>방식</th><th>지금 평가액</th>'
-                                    f'<th>수익률</th></tr></thead><tbody>{rows}</tbody></table></div>')
+                                    f'<th>수익률</th></tr></thead><tbody>{rows}</tbody></table></div>'
+                                    '<p class="hint">방식을 누르면 지금 들고 있는 종목과 끝난 거래를 볼 수 있어요.</p>')
     P = ms.get(L.get("pick"))
     if P:
         nm = L.get("names", {})
@@ -316,7 +317,7 @@ def live_card(L: dict | None, base: str = "") -> str:
             + (f' <span class="{tone(e[5])}">{pct(e[5], 1)}</span>' if e[1] == "s" else "")
             + f'<small>{h(LB.strat(e[3]))}' + (f' · {WHY_KO.get(e[6], e[6])}' if e[1] == "s" else "") + '</small></span></li>'
             for e in reversed(P["events"][-10:]))
-        body += (f'<h3 class="lvh">⭐ {h(P["label"])} · 지금 들고 있는 것</h3>'
+        body += (f'<h3 class="lvh"><a class="lvm" href="/sim/{h(L["pick"])}">⭐ {h(P["label"])} · 지금 들고 있는 것</a></h3>'
                  + (f'<ul class="plain feed">{hold}</ul>' if hold else '<p class="lead">지금은 현금만 들고 있어요.</p>')
                  + (f'<h3 class="lvh">최근 매매</h3><ul class="plain feed">{feed}</ul>' if feed else ""))
     return card("📒 지금부터 모의투자", body, ("/reports?t=notes", "투자 노트"), f"{days}거래일째")
@@ -348,6 +349,9 @@ LIVE_CSS = """<style>
 .lv0{background:#2a78d6}.lv1{background:#eb6834}.lv2{background:#1baf7a}.lv3{background:#eda100}.lv4{background:#e87ba4}
 .sw.ref{background:transparent;border:1.5px dashed var(--ink3)}
 @media (prefers-color-scheme:dark){.lv0{background:#3987e5}.lv1{background:#d95926}.lv2{background:#199e70}.lv3{background:#c98500}.lv4{background:#d55181}}
+.lvm{color:inherit;text-decoration:none;display:block}.lvm b::after,.lvh .lvm::after{content:" ›";color:var(--ink3);font-weight:400}
+.lvm:hover b,.lvh .lvm:hover{text-decoration:underline;text-underline-offset:3px}
+.lvm small.sub{display:block;color:var(--ink3);font-size:12px;font-weight:400}
 .lvh{font-size:15px;margin:18px 0 2px}.lvchart{position:relative;height:180px;margin:4px 0 10px;touch-action:pan-y}
 .lvchart svg{display:block;width:100%;height:100%;overflow:visible}.lvchart .g{stroke:var(--line)}.lvchart .gl{fill:var(--ink3);font-size:11px}
 .lvchart .ln{fill:none;stroke-width:2;stroke-linejoin:round;stroke-linecap:round}.lvchart .bench{stroke:var(--ink3);stroke-dasharray:5 4;stroke-width:1.5}

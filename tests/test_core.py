@@ -359,6 +359,49 @@ def test_live_stats_and_readiness():
     assert "직접 투자 준비도 3/5" in html and "전략별 실전 성적" in html
 
 
+def test_sim_method_page_shows_holdings_and_closed_trades(tmp_path, monkeypatch):
+    """Each method in the /sim ranking opens its own page: what it holds now and what it has sold."""
+    from stockmining import live as LV
+    from stockmining import web
+    from stockmining import quotes as Q
+    from stockmining.config import load_config
+    from stockmining.jobs import App
+    monkeypatch.setattr(Q, "get", lambda codes: {"064290": {"price": 47000.0}})
+    monkeypatch.setattr(Q, "history_kr", lambda code, n=250: [])  # no network in tests
+    p = tmp_path / "c.yaml"
+    p.write_text(yaml.safe_dump({"market": "kr", "notifier": "console", "db_path": str(tmp_path / "k.db"),
+                                 "principles_path": str(tmp_path / "p.md")}))
+    app = App(load_config(p))
+    eq = [["2026-11-05", 1.0], ["2026-11-06", 0.98], ["2026-11-12", 1.05], ["2026-11-13", 1.08]]
+    st = {"start": "2026-11-05", "last": "2026-11-13", "pick": "best", "amount": 10_000_000, "market": "kr",
+          "bench": {"name": "코스피", "base": 100.0, "eq": [[d, 1.0] for d, _ in eq]},
+          "names": {"064290": "인텍플러스", "159010": "아스플로"}, "methods": {
+              "top3": {"label": "분기 상위 3개 전략", "desc": "분기마다 지난 2년 성적 상위 3개 전략만 써요.", "slots": 5,
+                       "cash": 0.6, "eq": eq,
+                       "pos": [{"code": "064290", "strategy": "bb_trend_pullback", "signal_date": "2026-11-11",
+                                "entry_date": "2026-11-12", "entry": 48150.0, "stop": 40000.0, "target": None,
+                                "alloc": 0.2, "last": 47600.0, "regime": "bear", "news": "none"}],
+                       "events": [["2026-11-06", "b", "159010", "bb_trend_pullback", 24000.0, None, ""],
+                                  ["2026-11-12", "s", "159010", "bb_trend_pullback", 33600.0, 39.4, "rule", "2026-11-06",
+                                   "bear", "unknown"],
+                                  ["2026-11-12", "b", "064290", "bb_trend_pullback", 48150.0, None, ""]]},
+              "best": {"label": "분기 1등 따라가기", "desc": "분기마다 지난 2년 성적이 가장 좋았던 전략 하나만 써요.", "slots": 5,
+                       "cash": 1.0, "pos": [], "events": [], "eq": [[d, 1.0] for d, _ in eq]}}}
+    LV.save(app.db, st)
+
+    ranking = web.route(app.cfg, app.db, "/sim", {})
+    assert 'href="/sim/top3"' in ranking and 'href="/sim/best"' in ranking
+    html = web.route(app.cfg, app.db, "/sim/top3", {})
+    assert "분기 상위 3개 전략" in html and "인텍플러스" in html and "아스플로" in html
+    assert "48,150원" in html and "40,000원" in html and "뉴스 없음" in html  # holding: buy price, stop, news at buy
+    assert "+39.4%" in html and "11/06 → 11/12" in html and "조건 청산" in html  # closed trade
+    assert "24,000원" in html and "33,600원" in html and "+40.00%" in html and "하락장" in html  # its details
+    assert "+8.0%" in html and "부터 3거래일" in html and "2거래일" in html  # total return, days run, days held
+    assert "현금만 들고 있어요" in web.route(app.cfg, app.db, "/sim/best", {})
+    with pytest.raises(web.NotFound):
+        web.route(app.cfg, app.db, "/sim/nope", {})
+
+
 def test_weekly_playbook_builds_on_previous_note(tmp_path, monkeypatch):
     from stockmining import live as LV
     from stockmining import analyst as AI

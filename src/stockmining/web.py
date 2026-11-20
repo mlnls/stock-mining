@@ -469,6 +469,90 @@ def reports(c: Ctx, tab: str) -> tuple[str, str, list[str]]:
     return "리포트", "".join(out), []
 
 
+def sim_method(c: Ctx, mid: str) -> tuple[str, str, list[str]]:
+    """/sim/<method>: what one forward mock-investing method holds now and every trade it has closed."""
+    L = LV.load(c.db)
+    M = (L or {}).get("methods", {}).get(mid)
+    if not M:
+        raise NotFound
+    amt, nm, cur = L["amount"], L.get("names", {}), c.cur
+    m = next(x for x in LV.stats(L)["methods"] if x["id"] == mid)
+    eq, pick = M["eq"][-1][1], mid == L.get("pick")
+    days = [d for d, _ in M["eq"][1:]]
+    us_note = " 미국 종목도 원화로 바꿔 넣었다고 치고, 환율 변화는 빼고 계산해요." if c.cfg.is_us else ""
+    summary = [("지금 평가액", f'{money(amt * eq, "KRW")} <small class="{tone(eq - 1)}">{pct((eq - 1) * 100, 1)}</small>'),
+               (f'{h(L["bench"]["name"])} 대비', f'<span class="{tone(m["vs_bench_pct"])}">{pct(m["vs_bench_pct"], 1)}p</span>'
+                if m["vs_bench_pct"] is not None else "-"),
+               ("현금", f'{money(amt * M["cash"], "KRW")} <small>{M["cash"] / eq:.0%}</small>' if eq else "-"),
+               ("들고 있는 종목", f'{len(M["pos"])}종목 <small>최대 {M["slots"]}종목</small>'),
+               ("끝난 거래", f'{m["closed"]}번 · 이긴 비율 {m["win_rate"]:.0f}% · 평균 '
+                f'<span class="{tone(m["avg_pct"])}">{pct(m["avg_pct"], 1)}</span>' if m["closed"] else "아직 없어요"),
+               ("고점 대비 가장 많이 빠진 폭", f'{m["mdd_pct"]:.1f}%'),
+               ("기준", f'{L["last"]} 장 마감 · {_dt_ko(L["start"])}부터 {len(days)}거래일')]
+    out = [card(("⭐ " if pick else "") + h(M["label"]),
+                f'<p class="lead">{h(M["desc"])}' + (" ⭐는 Claude가 고른 방식이에요." if pick else "") + us_note + '</p>' + kv(summary))]
+
+    codes = [p["code"] for p in M["pos"]]
+    qs = Q.get(codes) if codes else {}
+    rows = ""
+    for i, p in enumerate(sorted(M["pos"], key=lambda p: p["entry_date"], reverse=True)):
+        code, q, entry = p["code"], qs.get(p["code"]), p["entry"]
+        held = sum(1 for d in days if d >= p["entry_date"])
+        items = [("지금 가격", live(code, "price", q, cur) + " " + market_state(q)),
+                 ("산 가격 대비", live(code, "vs", q, cur, ref=entry)),
+                 ("산 가격", f'{money(entry, cur)} <small>{_md(p["entry_date"])} 시가</small>'),
+                 ("손절가", f'{money(p["stop"], cur)} <small class="down">{pct((p["stop"] / entry - 1) * 100, 1)}</small>'),
+                 ("목표가", money(p["target"], cur) if p.get("target") else "없음 · 파는 조건이 나올 때까지 보유"),
+                 ("넣은 돈", money(amt * p["alloc"], "KRW")),
+                 ("장 마감 평가액", f'{money(amt * p["alloc"] * p["last"] / entry, "KRW")} '
+                  f'<small class="{tone(p["last"] - entry)}">{pct((p["last"] / entry - 1) * 100, 1)}</small>'),
+                 ("들고 있은 날", f'{held}거래일 <small>{_md(p["signal_date"])} 신호</small>')]
+        if p.get("news") and p["news"] != "unknown":
+            items.append(("살 때 뉴스", NW.LABEL_KO.get(p["news"], p["news"])))
+        body = (chart(c.series(code, 120), cur, {"avg": entry, "stop": p["stop"], "target": p.get("target")}) + kv(items)
+                + f'<p class="hint"><a href="/strategy/{h(p["strategy"])}"><b>이 전략 보기 ›</b></a> · '
+                  f'<a href="/stock/{h(code)}"><b>종목 보기 ›</b></a></p>')
+        rows += fold_row(avatar(code), f'{h(code)} <small class="nm">{h(nm.get(code) or c.name(code))}</small>',
+                         h(LB.strat(p["strategy"])),
+                         live(code, "price", q, cur), "산 가격 대비 " + live(code, "vs", q, cur, ref=entry), body, i == 0)
+    out.append(card("지금 들고 있는 것", rows or empty("💵", "지금은 현금만 들고 있어요."),
+                    count=f'{len(M["pos"])}종목' if M["pos"] else ""))
+
+    buys = {(e[2], e[3], e[0]): e[4] for e in M["events"] if e[1] == "b"}
+    trades = ""
+    for e in reversed([e for e in M["events"] if e[1] == "s"]):
+        code, why = e[2], WS.WHY_KO.get(e[6], e[6])
+        bought = e[7] if len(e) > 7 else None
+        buy = buys.get((code, e[3], bought))
+        items = [("산 가격", f'{money(buy, cur)} <small>{_md(bought)} 시가</small>' if buy else "-"),
+                 ("판 가격", f'{money(e[4], cur)} <small>{_md(e[0])} · {why}</small>'),
+                 ("수익률", f'<span class="{tone(e[5])}">{pct(e[5], 2)}</span> <small>비용 빼기 전 '
+                  f'{pct((e[4] / buy - 1) * 100, 2) if buy else "-"}</small>')]
+        if bought:
+            items.append(("들고 있은 날", f'{sum(1 for d in days if bought <= d <= e[0])}거래일'))
+        if len(e) > 8 and e[8]:
+            items.append(("살 때 시장", LB.regime(e[8])))
+        if len(e) > 9 and e[9] != "unknown":
+            items.append(("살 때 뉴스", NW.LABEL_KO.get(e[9], e[9])))
+        body = (kv(items) + f'<p class="hint"><a href="/strategy/{h(e[3])}"><b>이 전략 보기 ›</b></a> · '
+                f'<a href="/stock/{h(code)}"><b>종목 보기 ›</b></a></p>')
+        trades += fold_row(avatar(code), f'{h(code)} <small class="nm">{h(nm.get(code) or c.name(code))}</small>',
+                           f'{h(LB.strat(e[3]))} · {why}', f'<span class="{tone(e[5])}">{pct(e[5], 1)}</span>',
+                           (f"{_md(bought)} → " if bought else "") + _md(e[0]), body)
+    n_closed = sum(1 for e in M["events"] if e[1] == "s")
+    out.append(card("끝난 거래", ('<p class="lead">수익률은 수수료·슬리피지를 뺀 값이에요.</p>' + trades) if trades
+                    else empty("⏳", "아직 판 종목이 없어요."), count=f"{n_closed}번" if n_closed else ""))
+    return M["label"], "".join(out), codes
+
+
+def _dt_ko(s: str) -> str:
+    return f"{int(s[5:7])}월 {int(s[8:10])}일"
+
+
+def _md(s: str) -> str:
+    return s[5:10].replace("-", "/")
+
+
 def report(c: Ctx, rid: str) -> tuple[str, str, list[str]]:
     if not rid.isdigit():
         raise NotFound
@@ -514,6 +598,8 @@ def route(cfg: Config, db: DB, path: str, query: dict, kr: tuple | None = None) 
         body = card("📰 시장 뉴스", news_list(mk, 60) or empty("📰", "저녁 배치가 한 번 돌면 뉴스가 쌓여요."), count=f"{len(mk)}건")
     elif parts == ["sim"]:
         title, body, codes, tab = ("타임머신 모의투자" + (" · 국내" if base else ""), WS.live_page(LV.load(c.db)) + WS.page_body(WS.load(c.db)), [], "/sim")
+    elif len(parts) == 2 and parts[0] == "sim":
+        (title, body, codes), tab, back = sim_method(c, parts[1]), "/sim", "/sim"
     elif parts == ["reports"]:
         (title, body, codes), tab = reports(c, (query.get("t") or ["list"])[0]), "/reports"
     elif len(parts) == 2 and parts[0] == "report":
